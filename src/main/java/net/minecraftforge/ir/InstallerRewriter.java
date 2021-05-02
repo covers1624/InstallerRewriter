@@ -20,12 +20,14 @@ package net.minecraftforge.ir;
 
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Sets;
+import com.google.common.hash.HashCode;
 import joptsimple.OptionParser;
 import joptsimple.OptionSet;
 import joptsimple.OptionSpec;
 import joptsimple.util.PathConverter;
 import net.covers1624.quack.io.IOUtils;
 import net.covers1624.quack.maven.MavenNotation;
+import net.covers1624.quack.util.MultiHasher;
 import net.covers1624.quack.util.SneakyUtils;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
@@ -38,13 +40,14 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.maven.artifact.versioning.ComparableVersion;
 
-import java.io.IOException;
-import java.io.InputStream;
+import java.io.*;
 import java.net.URL;
+import java.nio.file.FileSystem;
 import java.nio.file.*;
 import java.nio.file.attribute.FileTime;
 import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
 import static java.util.Arrays.asList;
@@ -53,6 +56,7 @@ import static net.minecraftforge.ir.Utils.makeParents;
 /**
  * Created by covers1624 on 30/4/21.
  */
+@SuppressWarnings ("UnstableApiUsage")
 public class InstallerRewriter {
 
     public static final Logger LOGGER = LogManager.getLogger();
@@ -83,6 +87,13 @@ public class InstallerRewriter {
             InstallerFormat.V2, new InstallerV2Processor()
     );
 
+    private static final List<MultiHasher.HashFunc> HASH_FUNCS = Arrays.asList(
+            MultiHasher.HashFunc.MD5,
+            MultiHasher.HashFunc.SHA1,
+            MultiHasher.HashFunc.SHA256,
+            MultiHasher.HashFunc.SHA512
+    );
+
     //Speeeeeeed.
     private static final Set<String> recentFiles = new HashSet<>();
     private static final Map<String, Boolean> recentHeadRequests = new HashMap<>();
@@ -107,9 +118,32 @@ public class InstallerRewriter {
                 .withRequiredArg()
                 .withValuesConvertedBy(new PathConverter());
 
-        OptionSpec<Path> outputRepoPathOpt = parser.acceptsAll(asList("o", "output"), "The directory to outputPath updated files.")
+        OptionSpec<Path> backupPathOpt = parser.acceptsAll(asList("b", "backup"), "The directory to place the old installers into.")
                 .withRequiredArg()
                 .withValuesConvertedBy(new PathConverter());
+
+        //Signing
+        OptionSpec<Void> signOpt = parser.acceptsAll(asList("sign"), "If jars should be signed or not.");
+        OptionSpec<Path> keyStoreOpt = parser.acceptsAll(asList("keyStore"), "The keystore to use for signing.")
+                .availableIf(signOpt)
+                .requiredIf(signOpt)
+                .withRequiredArg()
+                .withValuesConvertedBy(new PathConverter());
+
+        OptionSpec<String> keyAliasOpt = parser.acceptsAll(asList("keyAlias"), "The key alias to use for signing.")
+                .availableIf(signOpt)
+                .requiredIf(signOpt)
+                .withRequiredArg();
+
+        OptionSpec<String> keyStorePassOpt = parser.acceptsAll(asList("keyStorePass"), "The password for the provided keystore.")
+                .availableIf(signOpt)
+                .requiredIf(signOpt)
+                .withRequiredArg();
+
+        OptionSpec<String> keyPassOpt = parser.acceptsAll(asList("keyPass"), "The password for key within the provide keystore.")
+                .availableIf(signOpt)
+                .requiredIf(signOpt)
+                .withRequiredArg();
 
         OptionSet optSet = parser.parse(args);
         if (optSet.has(helpOpt)) {
@@ -123,8 +157,8 @@ public class InstallerRewriter {
             return -1;
         }
 
-        if (!optSet.has(outputRepoPathOpt)) {
-            LOGGER.error("Expected --output argument.");
+        if (!optSet.has(backupPathOpt)) {
+            LOGGER.error("Expected --backup argument.");
             parser.printHelpOn(System.err);
             return -1;
         }
@@ -135,7 +169,16 @@ public class InstallerRewriter {
             return -1;
         }
 
-        Path outputPath = optSet.valueOf(outputRepoPathOpt);
+        Path backupPath = optSet.valueOf(backupPathOpt);
+
+        SignProps signProps = null;
+        if (optSet.has(signOpt)) {
+            signProps = new SignProps();
+            signProps.keyStorePath = optSet.valueOf(keyStoreOpt);
+            signProps.keyAlias = optSet.valueOf(keyAliasOpt);
+            signProps.keyStorePass = optSet.valueOf(keyStorePassOpt);
+            signProps.keyPass = optSet.valueOf(keyPassOpt);
+        }
 
         LOGGER.info("Resolving latest Forge installer..");
         MavenNotation installerNotation = MavenNotation.parse(optSet.valueOf(installerCoordsOpt));
@@ -191,32 +234,38 @@ public class InstallerRewriter {
         folderVersions.sort(Comparator.comparing(ComparableVersion::new));
         LOGGER.info("Processing versions..");
         for (String version : folderVersions) {
-            processVersion(forgeNotation.withVersion(version), repoPath, outputPath, latestInstallerPath);
+            processVersion(signProps, forgeNotation.withVersion(version), repoPath, backupPath, latestInstallerPath);
         }
 
         return 0;
     }
 
-    public static void processVersion(MavenNotation notation, Path repo, Path outputPath, Path latestInstaller) throws IOException {
+    public static void processVersion(SignProps signProps, MavenNotation notation, Path repo, Path backupPath, Path latestInstaller) throws IOException {
         if (notation.version.startsWith("1.5.2-")) return; //TODO Temporary
 
         MavenNotation installer = notation.withClassifier("installer");
         MavenNotation installerWin = notation.withClassifier("installer-win").withExtension("exe");
-        Path jarInstallerPath = repo.resolve(installer.toPath());
-        Path winInstallerPath = repo.resolve(installerWin.toPath());
-        if (Files.notExists(jarInstallerPath)) {
+
+        Path repoInstallerPath = repo.resolve(installer.toPath());
+        Path repoWinInstallerPath = repo.resolve(installerWin.toPath());
+
+        if (Files.notExists(repoInstallerPath)) {
             LOGGER.warn("Missing installer for: {}", notation);
             return;
         }
         LOGGER.info("Found installer jar for: {}", notation);
-        //        if (Files.exists(winInstallerPath)) {
-//            LOGGER.info("Found win installer for: {}", notation);
-//            if (Files.notExists(jarInstallerPath)) {
-//                LOGGER.error(" Jar installer does not exist for: {}", notation);
-//            }
-//        }
 
-        try (FileSystem fs = IOUtils.getJarFileSystem(jarInstallerPath, true)) {
+        Path installerBackupPath = makeParents(backupPath.resolve(installer.toPath()));
+        Path installerWinBackupPath = makeParents(backupPath.resolve(installerWin.toPath()));
+
+        Files.move(repoInstallerPath, installerBackupPath);
+        moveAssociated(repoInstallerPath, installerBackupPath);
+        if (Files.exists(repoWinInstallerPath)) {
+            Files.move(repoWinInstallerPath, installerWinBackupPath);
+            moveAssociated(repoWinInstallerPath, installerWinBackupPath);
+        }
+
+        try (FileSystem fs = IOUtils.getJarFileSystem(installerBackupPath, true)) {
             Path jarRoot = fs.getPath("/");
             InstallerFormat probableFormat = InstallerFormat.detectInstallerFormat(jarRoot);
             if (probableFormat == null) {
@@ -227,11 +276,25 @@ public class InstallerRewriter {
             LOGGER.info("Processing {}..", notation);
 
             InstallerProcessor processor = PROCESSORS.get(probableFormat);
-            Path newInstaller = outputPath.resolve(installer.toPath());
-            Files.copy(latestInstaller, makeParents(newInstaller), StandardCopyOption.REPLACE_EXISTING);
+            Files.copy(latestInstaller, repoInstallerPath, StandardCopyOption.REPLACE_EXISTING);
 
-            processor.process(notation, repo, newInstaller, jarRoot);
+            processor.process(notation, repo, repoInstallerPath, jarRoot);
             LOGGER.info("Processing finished!");
+        }
+
+        if (signProps != null) {
+            signJar(signProps, repoInstallerPath);
+        }
+
+        MultiHasher hasher = new MultiHasher(HASH_FUNCS);
+        hasher.load(repoInstallerPath);
+        MultiHasher.HashResult result = hasher.finish();
+        for (Map.Entry<MultiHasher.HashFunc, HashCode> entry : result.entrySet()) {
+            Path hashFile = repoInstallerPath.resolveSibling(repoInstallerPath.getFileName() + "." + entry.getKey().name.toLowerCase());
+            try (PrintWriter out = new PrintWriter(Files.newBufferedWriter(hashFile))) {
+                out.print(entry.getValue().toString());
+                out.flush();
+            }
         }
     }
 
@@ -260,6 +323,52 @@ public class InstallerRewriter {
         }
         LOGGER.info("Resolved Forge installer: {}", ret);
         return ret;
+    }
+
+    public static void moveAssociated(Path theFile, Path theNewFile) throws IOException {
+        String theFileName = theFile.getFileName().toString();
+        List<Path> associated = Files.list(theFile.getParent())
+                .filter(e -> e.getFileName().toString().startsWith(theFileName))
+                .collect(Collectors.toList());
+        for (Path assoc : associated) {
+            Files.move(assoc, theNewFile.resolveSibling(assoc.getFileName()));
+        }
+    }
+
+    public static void signJar(SignProps props, Path jarToSign) throws IOException {
+        Process process = new ProcessBuilder()
+                .command(asList(
+                        Utils.getJarSignExecutable().toAbsolutePath().toString(),
+                        "-keystore",
+                        props.keyStorePath.toAbsolutePath().toString(),
+                        "-storepass",
+                        props.keyStorePass,
+                        "-keypass",
+                        props.keyPass,
+                        jarToSign.toAbsolutePath().toString(),
+                        props.keyAlias
+                ))
+                .start();
+        CompletableFuture<Void> stdoutFuture = redirect(process.getInputStream());
+        CompletableFuture<Void> stderrFuture = redirect(process.getErrorStream());
+        try {
+            process.waitFor();
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }
+        if (!stdoutFuture.isDone()) stdoutFuture.cancel(true);
+        if (!stderrFuture.isDone()) stderrFuture.cancel(true);
+    }
+
+    public static CompletableFuture<Void> redirect(InputStream stream) {
+        return CompletableFuture.runAsync(SneakyUtils.sneak(() -> {
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    LOGGER.info("Sign: {}", line);
+                }
+            }
+        }));
     }
 
     public static void downloadFile(URL url, Path file) throws IOException {
@@ -317,5 +426,13 @@ public class InstallerRewriter {
             recentHeadRequests.put(url.toString(), recent);
             return recent;
         }
+    }
+
+    public static class SignProps {
+
+        public Path keyStorePath = null;
+        public String keyAlias = null;
+        public String keyStorePass = null;
+        public String keyPass = null;
     }
 }

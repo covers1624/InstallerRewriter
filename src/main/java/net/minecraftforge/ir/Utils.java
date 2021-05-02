@@ -31,6 +31,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Collections;
 import java.util.List;
 
@@ -44,6 +45,9 @@ public class Utils {
             .registerTypeAdapter(MavenNotation.class, new MavenNotationAdapter())
             .setPrettyPrinting()
             .create();
+
+    public static Path JAVA_HOME = calcJavaHome();
+    public static String EXE_SUFFIX = System.getProperty("os.name").contains("windows") ? ".exe" : "";
 
     public static List<String> parseVersions(Path file) throws IOException {
         if (Files.exists(file)) {
@@ -60,11 +64,26 @@ public class Utils {
         return Collections.emptyList();
     }
 
-
     public static Path makeParents(Path file) throws IOException {
         if (Files.notExists(file.getParent())) {
             Files.createDirectories(file.getParent());
         }
         return file;
+    }
+
+    public static Path getJavaExecutable() {
+        return JAVA_HOME.resolve("bin/java" + EXE_SUFFIX);
+    }
+
+    public static Path getJarSignExecutable() {
+        return JAVA_HOME.resolve("bin/jarsigner" + EXE_SUFFIX);
+    }
+
+    public static Path calcJavaHome() {
+        Path home = Paths.get(System.getProperty("java.home")).toAbsolutePath().normalize();
+        if (home.getFileName().toString().equalsIgnoreCase("jre") && Files.exists(home.getParent().resolve("bin/java"))) {
+            return home.getParent();
+        }
+        return home;
     }
 }
