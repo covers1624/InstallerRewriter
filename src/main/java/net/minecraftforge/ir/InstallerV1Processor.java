@@ -42,6 +42,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.stream.Collectors;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
 
 import static net.minecraftforge.ir.InstallerRewriter.*;
 import static net.minecraftforge.ir.Utils.makeParents;
@@ -93,12 +95,62 @@ public class InstallerV1Processor implements InstallerProcessor {
                 LOGGER.error("'filePath' does not exist in old jar. {}", filePathStr);
                 return;
             }
+
+            //Load libraries referenced in the 'Class-Path' manifest attribute.
+            Set<MavenNotation> classpathLibraries = new HashSet<>();
+            //We load things with a ZipInputStream, as jar-in-jar zipfs is not supported.
+            try (ZipInputStream zin = new ZipInputStream(Files.newInputStream(filePath))) {
+                ZipEntry entry;
+                java.util.jar.Manifest manifest = null;
+                while ((entry = zin.getNextEntry()) != null) {
+                    if (entry.getName().endsWith("META-INF/MANIFEST.MF")) {
+                        manifest = new java.util.jar.Manifest(zin);
+                        break;
+                    }
+                }
+                List<String> classPath = new ArrayList<>();
+                if (manifest != null) {
+                    String cp = manifest.getMainAttributes().getValue("Class-Path");
+                    if (cp != null) {
+                        Arrays.stream(cp.split(" "))
+                                .filter(e -> e.startsWith("libraries/"))
+                                .map(e -> e.substring(10))
+                                .forEach(classPath::add);
+                    }
+                }
+                for (String s : classPath) {
+                    String[] splits = s.split("/");
+                    int len = splits.length;
+                    if (len < 4) continue; //Invalid
+
+                    String file = splits[len - 1];  //Grab file, version, and module segments.
+                    String version = splits[len - 2];
+                    String module = splits[len - 3];
+                    StringBuilder gBuilder = new StringBuilder();
+                    for (int i = 0; i < len - 3; i++) { // Assemble remaining into group.
+                        if (gBuilder.length() > 0) {
+                            gBuilder.append(".");
+                        }
+                        gBuilder.append(splits[i]);
+                    }
+                    String fPart = file.replaceFirst(module + "-", ""); // Strip module name
+                    fPart = fPart.replaceFirst(version, ""); // Strip version
+                    int lastDot = fPart.lastIndexOf("."); // Assumes we only have a single dot in the extension.
+                    String classifer = "";
+                    if (fPart.startsWith("-")) { // We have a classifier.
+                        classifer = fPart.substring(1, lastDot);
+                    }
+                    String extension = fPart.substring(lastDot + 1);
+                    classpathLibraries.add(new MavenNotation(gBuilder.toString(), module, version, classifer, extension));
+                }
+            }
+
             //TODO, grab license files from src jar.
             Files.copy(filePath, makeParents(universalJar));
             Install install = generateInstallProfile(notation, universalJar);
             Files.write(newJarRoot.resolve("install_profile.json"), Utils.GSON.toJson(install).getBytes(StandardCharsets.UTF_8));
 
-            Version version = generateVersionJson(notation, install, v1Profile);
+            Version version = generateVersionJson(install, v1Profile, classpathLibraries);
             Files.write(newJarRoot.resolve("version.json"), Utils.GSON.toJson(version).getBytes(StandardCharsets.UTF_8));
         }
     }
@@ -139,7 +191,7 @@ public class InstallerV1Processor implements InstallerProcessor {
         return install;
     }
 
-    public static Version generateVersionJson(MavenNotation notation, Install newProfile, V1InstallProfile v1Profile) throws IOException {
+    public static Version generateVersionJson(Install newProfile, V1InstallProfile v1Profile, Set<MavenNotation> classpathLibraries) throws IOException {
         V1InstallProfile.VersionInfo v1VersionInfo = v1Profile.versionInfo;
         Version version = new Version();
         version._comment_ = comment;
@@ -197,19 +249,46 @@ public class InstallerV1Processor implements InstallerProcessor {
         List<Version.Library> libraries = version.getLibraries();
         for (V1InstallProfile.Library library : v1VersionInfo.libraries) {
             LOGGER.info("Processing library: {}", library.name);
-            libraries.add(rewriteLibrary(library, newProfile));
+            libraries.add(rewriteLibrary(library, newProfile, classpathLibraries));
+        }
+
+        //Validate all libraries declared in the Class-Path manifest entry exist.
+        for (MavenNotation l : classpathLibraries) {
+            boolean found = false;
+            for (Version.Library library : version.getLibraries()) {
+                MavenNotation name = library.name;
+                if (name.equals(l)) {
+                    LOGGER.info("Classpath library {} validated.", l);
+                    found = true;
+                    break;
+                }
+            }
+            if (found) continue;
+            LOGGER.error("Classpath library {}, not found!", l);
         }
 
         return version;
     }
 
-    public static Version.Library rewriteLibrary(V1InstallProfile.Library oldLibrary, Install newProfile) throws IOException {
+    public static Version.Library rewriteLibrary(V1InstallProfile.Library oldLibrary, Install newProfile, Set<MavenNotation> classpathLibraries) throws IOException {
 
         MavenNotation name = oldLibrary.name;
         //This is the universal jar, without classifier.
         if (name.module.equals("forge") || name.module.equals("minecraftforge")) {
             return newProfile.getLibraries().get(0);
         }
+
+        //If we dont find this library in the Class-Path entry
+        if (!classpathLibraries.contains(name)) {
+            for (MavenNotation l : classpathLibraries) {
+                //Attempt to find a compatible group, module, and classifier
+                if (!name.group.equals(l.group) || !name.module.equals(l.module) || !Objects.equals(name.classifier, l.classifier)) continue;
+                LOGGER.warn("Correcting incorrect library, Classpath assumes '{}', got '{}'", l, name);
+                //Update the entry to match what the classpath expects.
+                name = l;
+            }
+        }
+
         Version.Library library = new Version.Library();
         Version.Downloads downloads = new Version.Downloads();
         Version.LibraryDownload libraryDownload = new Version.LibraryDownload();
