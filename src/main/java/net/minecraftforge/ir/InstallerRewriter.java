@@ -39,6 +39,7 @@ import okio.Source;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.maven.artifact.versioning.ComparableVersion;
+import org.jetbrains.annotations.Nullable;
 
 import java.io.*;
 import java.net.URL;
@@ -114,11 +115,19 @@ public class InstallerRewriter {
                 .withRequiredArg()
                 .defaultsTo("net.minecraftforge:installer:2.0.+:shrunk");
 
+        OptionSpec<Void> inPlaceOpt = parser.acceptsAll(asList("i", "in-place"), "Specifies if we should update the repository in-place, moving old installers to the specified backups dir, or if we should use an output folder.");
+
         OptionSpec<Path> repoPathOpt = parser.acceptsAll(asList("r", "repo"), "The repository path on disk.")
                 .withRequiredArg()
                 .withValuesConvertedBy(new PathConverter());
 
         OptionSpec<Path> backupPathOpt = parser.acceptsAll(asList("b", "backup"), "The directory to place the old installers into.")
+                .requiredIf(inPlaceOpt)
+                .withRequiredArg()
+                .withValuesConvertedBy(new PathConverter());
+
+        OptionSpec<Path> outputPathOpt = parser.acceptsAll(asList("o", "output"), "The directory to place installers when in-place mode is turned off.")
+                .requiredUnless(inPlaceOpt)
                 .withRequiredArg()
                 .withValuesConvertedBy(new PathConverter());
 
@@ -151,16 +160,22 @@ public class InstallerRewriter {
             return -1;
         }
 
+        boolean inPlace = optSet.has(inPlaceOpt);
+
         if (!optSet.has(repoPathOpt)) {
             LOGGER.error("Expected --repo argument.");
             parser.printHelpOn(System.err);
             return -1;
         }
 
-        if (!optSet.has(backupPathOpt)) {
+        if (inPlace && !optSet.has(backupPathOpt)) {
             LOGGER.error("Expected --backup argument.");
             parser.printHelpOn(System.err);
             return -1;
+        }
+
+        if (!inPlace && !optSet.has(outputPathOpt)) {
+            LOGGER.error("Expected --output argument.");
         }
 
         Path repoPath = optSet.valueOf(repoPathOpt);
@@ -169,7 +184,15 @@ public class InstallerRewriter {
             return -1;
         }
 
-        Path backupPath = optSet.valueOf(backupPathOpt);
+        Path backupPath;
+        Path outputPath;
+        if (inPlace) {
+            backupPath = optSet.valueOf(backupPathOpt);
+            outputPath = null;
+        } else {
+            backupPath = null;
+            outputPath = optSet.valueOf(outputPathOpt);
+        }
 
         SignProps signProps = null;
         if (optSet.has(signOpt)) {
@@ -234,20 +257,22 @@ public class InstallerRewriter {
         folderVersions.sort(Comparator.comparing(ComparableVersion::new));
         LOGGER.info("Processing versions..");
         for (String version : folderVersions) {
-            processVersion(signProps, forgeNotation.withVersion(version), repoPath, backupPath, latestInstallerPath);
+            processVersion(signProps, forgeNotation.withVersion(version), repoPath, backupPath, outputPath, latestInstallerPath);
         }
 
         return 0;
     }
 
-    public static void processVersion(SignProps signProps, MavenNotation notation, Path repo, Path backupPath, Path latestInstaller) throws IOException {
+    public static void processVersion(SignProps signProps, MavenNotation notation, Path repo, @Nullable Path backupPath, @Nullable Path outputPath, Path latestInstaller) throws IOException {
         if (notation.version.startsWith("1.5.2-")) return; //TODO Temporary
+
+        boolean inPlace = backupPath != null;
 
         MavenNotation installer = notation.withClassifier("installer");
         MavenNotation installerWin = notation.withClassifier("installer-win").withExtension("exe");
 
-        Path repoInstallerPath = repo.resolve(installer.toPath());
-        Path repoWinInstallerPath = repo.resolve(installerWin.toPath());
+        Path repoInstallerPath = installer.toPath(repo);
+        Path repoWinInstallerPath = installerWin.toPath(repo);
 
         if (Files.notExists(repoInstallerPath)) {
             LOGGER.warn("Missing installer for: {}", notation);
@@ -255,17 +280,26 @@ public class InstallerRewriter {
         }
         LOGGER.info("Found installer jar for: {}", notation);
 
-        Path installerBackupPath = makeParents(backupPath.resolve(installer.toPath()));
-        Path installerWinBackupPath = makeParents(backupPath.resolve(installerWin.toPath()));
+        Path oldInstallerPath;
+        Path newInstallerPath;
+        if (inPlace) {
+            Path installerBackupPath = makeParents(installer.toPath(backupPath));
+            Path installerWinBackupPath = makeParents(installerWin.toPath(backupPath));
 
-        Files.move(repoInstallerPath, installerBackupPath);
-        moveAssociated(repoInstallerPath, installerBackupPath);
-        if (Files.exists(repoWinInstallerPath)) {
-            Files.move(repoWinInstallerPath, installerWinBackupPath);
-            moveAssociated(repoWinInstallerPath, installerWinBackupPath);
+            Files.move(repoInstallerPath, installerBackupPath);
+            moveAssociated(repoInstallerPath, installerBackupPath);
+            if (Files.exists(repoWinInstallerPath)) {
+                Files.move(repoWinInstallerPath, installerWinBackupPath);
+                moveAssociated(repoWinInstallerPath, installerWinBackupPath);
+            }
+            oldInstallerPath = installerBackupPath;
+            newInstallerPath = repoInstallerPath;
+        } else {
+            oldInstallerPath = repoInstallerPath;
+            newInstallerPath = installer.toPath(outputPath);
         }
 
-        try (FileSystem fs = IOUtils.getJarFileSystem(installerBackupPath, true)) {
+        try (FileSystem fs = IOUtils.getJarFileSystem(oldInstallerPath, true)) {
             Path jarRoot = fs.getPath("/");
             InstallerFormat probableFormat = InstallerFormat.detectInstallerFormat(jarRoot);
             if (probableFormat == null) {
@@ -276,21 +310,21 @@ public class InstallerRewriter {
             LOGGER.info("Processing {}..", notation);
 
             InstallerProcessor processor = PROCESSORS.get(probableFormat);
-            Files.copy(latestInstaller, repoInstallerPath, StandardCopyOption.REPLACE_EXISTING);
+            Files.copy(latestInstaller, makeParents(newInstallerPath), StandardCopyOption.REPLACE_EXISTING);
 
-            processor.process(notation, repo, repoInstallerPath, jarRoot);
+            processor.process(notation, repo, newInstallerPath, jarRoot);
             LOGGER.info("Processing finished!");
         }
 
         if (signProps != null) {
-            signJar(signProps, repoInstallerPath);
+            signJar(signProps, newInstallerPath);
         }
 
         MultiHasher hasher = new MultiHasher(HASH_FUNCS);
-        hasher.load(repoInstallerPath);
+        hasher.load(newInstallerPath);
         MultiHasher.HashResult result = hasher.finish();
         for (Map.Entry<MultiHasher.HashFunc, HashCode> entry : result.entrySet()) {
-            Path hashFile = repoInstallerPath.resolveSibling(repoInstallerPath.getFileName() + "." + entry.getKey().name.toLowerCase());
+            Path hashFile = newInstallerPath.resolveSibling(newInstallerPath.getFileName() + "." + entry.getKey().name.toLowerCase());
             try (PrintWriter out = new PrintWriter(Files.newBufferedWriter(hashFile))) {
                 out.print(entry.getValue().toString());
                 out.flush();
