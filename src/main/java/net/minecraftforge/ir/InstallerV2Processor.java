@@ -27,6 +27,7 @@ import net.covers1624.quack.maven.MavenNotation;
 import net.covers1624.quack.util.HashUtils;
 import net.minecraftforge.ir.json.Install;
 import net.minecraftforge.ir.json.Version;
+import org.apache.commons.lang3.tuple.Pair;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -59,21 +60,25 @@ public class InstallerV2Processor implements InstallerProcessor {
     private static final Pattern PATTERN = Pattern.compile("^/$|^/maven/|^/.*\\.txt|^/.*\\.json");
 
     @Override
-    public void process(MavenNotation notation, Path repoPath, Path newInstaller, Path oldJarRoot) throws IOException {
-        try (FileSystem fs = IOUtils.getJarFileSystem(newInstaller, true)) {
-            Path newJarRoot = fs.getPath("/");
+    public void process(ProcessorContext ctx) throws IOException {
+        Pair<Path, Path> pathPair = ctx.getFile(ctx.installer);
+        try (FileSystem oldFs = IOUtils.getJarFileSystem(pathPair.getLeft(), true);
+             FileSystem newFs = IOUtils.getJarFileSystem(pathPair.getRight(), true)
+        ) {
+            Path oldJarRoot = oldFs.getPath("/");
+            Path newJarRoot = newFs.getPath("/");
             // Copy everything that matches the regex above.
             Files.walkFileTree(oldJarRoot, new CopyingFileVisitor(oldJarRoot, newJarRoot, e -> PATTERN.matcher("/" + e.toString()).find()));
 
             Path profileJson = newJarRoot.resolve("install_profile.json");
             if (!Files.exists(profileJson)) {
-                LOGGER.error("Missing install_profile.json {}", notation);
+                LOGGER.error("Missing install_profile.json {}", ctx.notation);
                 return;
             }
 
-            byte[] bytes = rewriteInstallProfile(notation, Files.newInputStream(profileJson), newJarRoot);
+            byte[] bytes = rewriteInstallProfile(ctx.notation, Files.newInputStream(profileJson), newJarRoot);
             if (bytes != null) {
-                LOGGER.info("Updating install_profile.json for {}", notation);
+                LOGGER.debug("Updating install_profile.json for {}", ctx.notation);
                 Files.delete(profileJson);
                 Files.write(profileJson, bytes);
             }
@@ -95,19 +100,19 @@ public class InstallerV2Processor implements InstallerProcessor {
         }
         byte[] bytes = rewriteVersionJson(notation, Files.newInputStream(versionJson), jarRoot);
         if (bytes != null) {
-            LOGGER.info("Updating json {}.", install.json);
+            LOGGER.debug("Updating json {}.", install.json);
             Files.delete(versionJson);
             Files.write(versionJson, bytes);
         }
 
         // Ensure Mirror List exists and is updated.
         if (install.mirrorList == null) {
-            LOGGER.info("Adding Mirror List to {}", notation);
+            LOGGER.debug("Adding Mirror List to {}", notation);
             install.mirrorList = MIRROR_LIST;
             changes = true;
         } else {
             if (!install.mirrorList.equals(MIRROR_LIST)) {
-                LOGGER.info("Updating Mirror List from {} to {}", install.mirrorList, MIRROR_LIST);
+                LOGGER.debug("Updating Mirror List from {} to {}", install.mirrorList, MIRROR_LIST);
                 install.mirrorList = MIRROR_LIST;
 
                 changes = true;
@@ -161,7 +166,7 @@ public class InstallerV2Processor implements InstallerProcessor {
             url = FORGE_MAVEN + url.substring(OLD_FORGE_MAVEN.length());
         }
         if (!origUrl.equals(url)) {
-            LOGGER.info("Rewrote URL from {} to {} in {}", origUrl, url, notation);
+            LOGGER.debug("Rewrote URL from {} to {} in {}", origUrl, url, notation);
             artifact.url = url;
             changes = true;
         }

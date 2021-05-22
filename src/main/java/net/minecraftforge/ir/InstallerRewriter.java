@@ -36,6 +36,7 @@ import okhttp3.ResponseBody;
 import okio.BufferedSink;
 import okio.Okio;
 import okio.Source;
+import org.apache.commons.lang3.tuple.Pair;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.maven.artifact.versioning.ComparableVersion;
@@ -269,10 +270,7 @@ public class InstallerRewriter {
         boolean inPlace = backupPath != null;
 
         MavenNotation installer = notation.withClassifier("installer");
-        MavenNotation installerWin = notation.withClassifier("installer-win").withExtension("exe");
-
         Path repoInstallerPath = installer.toPath(repo);
-        Path repoWinInstallerPath = installerWin.toPath(repo);
 
         if (Files.notExists(repoInstallerPath)) {
             LOGGER.warn("Missing installer for: {}", notation);
@@ -280,54 +278,73 @@ public class InstallerRewriter {
         }
         LOGGER.info("Found installer jar for: {}", notation);
 
-        Path oldInstallerPath;
-        Path newInstallerPath;
-        if (inPlace) {
-            Path installerBackupPath = makeParents(installer.toPath(backupPath));
-            Path installerWinBackupPath = makeParents(installerWin.toPath(backupPath));
-
-            Files.move(repoInstallerPath, installerBackupPath);
-            moveAssociated(repoInstallerPath, installerBackupPath);
-            if (Files.exists(repoWinInstallerPath)) {
-                Files.move(repoWinInstallerPath, installerWinBackupPath);
-                moveAssociated(repoWinInstallerPath, installerWinBackupPath);
-            }
-            oldInstallerPath = installerBackupPath;
-            newInstallerPath = repoInstallerPath;
-        } else {
-            oldInstallerPath = repoInstallerPath;
-            newInstallerPath = installer.toPath(outputPath);
-        }
-
-        try (FileSystem fs = IOUtils.getJarFileSystem(oldInstallerPath, true)) {
+        //Attempt to detect the installer format.
+        InstallerFormat probableFormat;
+        try (FileSystem fs = IOUtils.getJarFileSystem(repoInstallerPath, true)) {
             Path jarRoot = fs.getPath("/");
-            InstallerFormat probableFormat = InstallerFormat.detectInstallerFormat(jarRoot);
+            probableFormat = InstallerFormat.detectInstallerFormat(jarRoot);
             if (probableFormat == null) {
                 LOGGER.error("Unable to detect probable installer format for {}", notation);
                 return;
             }
-            LOGGER.info("Found probable format: {}", probableFormat);
-            LOGGER.info("Processing {}..", notation);
+        }
+        LOGGER.info("Found probable format: {}", probableFormat);
 
-            InstallerProcessor processor = PROCESSORS.get(probableFormat);
-            Files.copy(latestInstaller, makeParents(newInstallerPath), StandardCopyOption.REPLACE_EXISTING);
+        //List if files that need to be re hashed/signed
+        List<Path> modifiedFiles = new ArrayList<>();
+        ProcessorContext ctx = new ProcessorContext(notation, installer, repo) {
+            @Override
+            public Pair<Path, Path> getFile(MavenNotation notation) throws IOException {
+                Path repoFile = notation.toPath(repo);
+                Pair<Path, Path> pair;
+                if (inPlace) {
+                    Path backupFile = notation.toPath(backupPath);
+                    moveWithAssociated(repoFile, backupFile);
+                    modifiedFiles.add(repoFile);
+                    pair = Pair.of(backupFile, repoFile);
+                } else {
+                    Path outFile = notation.toPath(outputPath);
+                    modifiedFiles.add(outFile);
+                    pair = Pair.of(repoFile, outFile);
+                }
+                if (notation.equals(installer)) {
+                    Files.copy(latestInstaller, makeParents(pair.getRight()), StandardCopyOption.REPLACE_EXISTING);
+                }
+                return pair;
+            }
+        };
 
-            processor.process(notation, repo, newInstallerPath, jarRoot);
-            LOGGER.info("Processing finished!");
+        if (inPlace) {
+            //Move windows installers if found
+            MavenNotation winNotation = installer.withClassifier("installer-win").withClassifier("exe");
+            Path winFile = winNotation.toPath(repo);
+            if (Files.exists(winFile)) {
+                moveWithAssociated(winFile, winNotation.toPath(backupPath));
+            }
         }
 
-        if (signProps != null) {
-            signJar(signProps, newInstallerPath);
-        }
+        LOGGER.info("Processing {}..", notation);
 
-        MultiHasher hasher = new MultiHasher(HASH_FUNCS);
-        hasher.load(newInstallerPath);
-        MultiHasher.HashResult result = hasher.finish();
-        for (Map.Entry<MultiHasher.HashFunc, HashCode> entry : result.entrySet()) {
-            Path hashFile = newInstallerPath.resolveSibling(newInstallerPath.getFileName() + "." + entry.getKey().name.toLowerCase());
-            try (PrintWriter out = new PrintWriter(Files.newBufferedWriter(hashFile))) {
-                out.print(entry.getValue().toString());
-                out.flush();
+        InstallerProcessor processor = PROCESSORS.get(probableFormat);
+
+        processor.process(ctx);
+        LOGGER.info("Processing finished!");
+
+        for (Path file : modifiedFiles) {
+            //Re-sign all modified files.
+            if (signProps != null) {
+                signJar(signProps, file);
+            }
+
+            MultiHasher hasher = new MultiHasher(HASH_FUNCS);
+            hasher.load(file);
+            MultiHasher.HashResult result = hasher.finish();
+            for (Map.Entry<MultiHasher.HashFunc, HashCode> entry : result.entrySet()) {
+                Path hashFile = file.resolveSibling(file.getFileName() + "." + entry.getKey().name.toLowerCase());
+                try (PrintWriter out = new PrintWriter(Files.newBufferedWriter(hashFile))) {
+                    out.print(entry.getValue().toString());
+                    out.flush();
+                }
             }
         }
     }
@@ -359,13 +376,14 @@ public class InstallerRewriter {
         return ret;
     }
 
-    public static void moveAssociated(Path theFile, Path theNewFile) throws IOException {
-        String theFileName = theFile.getFileName().toString();
-        List<Path> associated = Files.list(theFile.getParent())
+    public static void moveWithAssociated(Path from, Path to) throws IOException {
+        Files.move(from, to);
+        String theFileName = from.getFileName().toString();
+        List<Path> associated = Files.list(from.getParent())
                 .filter(e -> e.getFileName().toString().startsWith(theFileName))
                 .collect(Collectors.toList());
         for (Path assoc : associated) {
-            Files.move(assoc, theNewFile.resolveSibling(assoc.getFileName()));
+            Files.move(assoc, to.resolveSibling(assoc.getFileName()));
         }
     }
 

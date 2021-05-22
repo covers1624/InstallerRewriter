@@ -18,10 +18,16 @@
  */
 package net.minecraftforge.ir;
 
+import com.google.common.hash.HashCode;
+import com.google.common.hash.HashFunction;
+import com.google.common.hash.Hashing;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import net.covers1624.quack.gson.MavenNotationAdapter;
 import net.covers1624.quack.maven.MavenNotation;
+import net.covers1624.quack.util.HashUtils;
+import net.minecraftforge.ir.ClasspathEntry.LibraryClasspathEntry;
+import net.minecraftforge.ir.ClasspathEntry.StringClasspathEntry;
 import org.apache.maven.artifact.repository.metadata.Metadata;
 import org.apache.maven.artifact.repository.metadata.Versioning;
 import org.apache.maven.artifact.repository.metadata.io.xpp3.MetadataXpp3Reader;
@@ -32,15 +38,21 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
 
 /**
  * Created by covers1624 on 30/4/21.
  */
+@SuppressWarnings ("UnstableApiUsage")
 public class Utils {
 
     private static final MetadataXpp3Reader METADATA_XPP3_READER = new MetadataXpp3Reader();
+    private static final HashFunction SHA256 = Hashing.sha256();
+
     public static final Gson GSON = new GsonBuilder()
             .registerTypeAdapter(MavenNotation.class, new MavenNotationAdapter())
             .setPrettyPrinting()
@@ -69,6 +81,68 @@ public class Utils {
             Files.createDirectories(file.getParent());
         }
         return file;
+    }
+
+    public static boolean contentEquals(Path a, Path b) throws IOException {
+        if (Files.notExists(a) || Files.notExists(b)) return false;
+        if (Files.size(a) != Files.size(b)) return false;
+        HashCode aHash = HashUtils.hash(SHA256, a);
+        HashCode bHash = HashUtils.hash(SHA256, b);
+        return aHash.equals(bHash);
+    }
+
+    public static List<ClasspathEntry> parseManifestClasspath(Path zipFile) throws IOException {
+        List<ClasspathEntry> classpathEntries = new ArrayList<>();
+        //We load things with a ZipInputStream, as jar-in-jar zipfs is not supported.
+        try (ZipInputStream zin = new ZipInputStream(Files.newInputStream(zipFile))) {
+            ZipEntry entry;
+            java.util.jar.Manifest manifest = null;
+            while ((entry = zin.getNextEntry()) != null) {
+                if (entry.getName().endsWith("META-INF/MANIFEST.MF")) {
+                    manifest = new java.util.jar.Manifest(zin);
+                    break;
+                }
+            }
+            List<String> classPath = new ArrayList<>();
+            if (manifest != null) {
+                String cp = manifest.getMainAttributes().getValue("Class-Path");
+                if (cp != null) {
+                    Collections.addAll(classPath, cp.split(" "));
+                }
+            }
+            for (String s : classPath) {
+                if (!s.startsWith("libraries/")) {
+                    classpathEntries.add(new StringClasspathEntry(s));
+                    continue;
+                }
+                s = s.substring(10);
+                String[] splits = s.split("/");
+                int len = splits.length;
+                if (len < 4) continue; //Invalid
+
+                String file = splits[len - 1];  //Grab file, version, and module segments.
+                String version = splits[len - 2];
+                String module = splits[len - 3];
+                StringBuilder gBuilder = new StringBuilder();
+                for (int i = 0; i < len - 3; i++) { // Assemble remaining into group.
+                    if (gBuilder.length() > 0) {
+                        gBuilder.append(".");
+                    }
+                    gBuilder.append(splits[i]);
+                }
+                String fPart = file.replaceFirst(module + "-", ""); // Strip module name
+                fPart = fPart.replaceFirst(version, ""); // Strip version
+                int lastDot = fPart.lastIndexOf("."); // Assumes we only have a single dot in the extension.
+                String classifer = "";
+                if (fPart.startsWith("-")) { // We have a classifier.
+                    classifer = fPart.substring(1, lastDot);
+                }
+                String extension = fPart.substring(lastDot + 1);
+                MavenNotation notation = new MavenNotation(gBuilder.toString(), module, version, classifer, extension);
+                classpathEntries.add(new LibraryClasspathEntry(notation));
+            }
+        }
+        return classpathEntries;
     }
 
     public static Path getJavaExecutable() {

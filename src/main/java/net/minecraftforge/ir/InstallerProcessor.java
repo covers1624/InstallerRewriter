@@ -18,10 +18,7 @@
  */
 package net.minecraftforge.ir;
 
-import net.covers1624.quack.maven.MavenNotation;
-
 import java.io.IOException;
-import java.nio.file.Path;
 
 /**
  * Created by covers1624 on 1/5/21.
@@ -31,10 +28,7 @@ public interface InstallerProcessor {
     /**
      * Processes a given installer into the latest format.
      *
-     * @param notation The {@link MavenNotation} for the installer being converted.
-     * @param repoPath          The forge maven repository.
-     * @param newInstaller      The new installer location.
-     * @param oldJarRoot        The root Path inside the old Launcher.
+     * @param ctx The context.
      */
-    void process(MavenNotation notation, Path repoPath, Path newInstaller, Path oldJarRoot) throws IOException;
+    void process(ProcessorContext ctx) throws IOException;
 }
