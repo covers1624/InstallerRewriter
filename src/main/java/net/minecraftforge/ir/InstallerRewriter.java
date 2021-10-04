@@ -27,6 +27,7 @@ import joptsimple.OptionSpec;
 import joptsimple.util.PathConverter;
 import net.covers1624.quack.io.IOUtils;
 import net.covers1624.quack.maven.MavenNotation;
+import net.covers1624.quack.util.JavaPathUtils;
 import net.covers1624.quack.util.MultiHasher;
 import net.covers1624.quack.util.SneakyUtils;
 import okhttp3.OkHttpClient;
@@ -42,18 +43,21 @@ import org.apache.logging.log4j.Logger;
 import org.apache.maven.artifact.versioning.ComparableVersion;
 import org.jetbrains.annotations.Nullable;
 
-import java.io.*;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.PrintWriter;
+import java.net.URISyntaxException;
 import java.net.URL;
-import java.nio.file.FileSystem;
 import java.nio.file.*;
 import java.nio.file.attribute.FileTime;
 import java.time.Duration;
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
 import static java.util.Arrays.asList;
+import static net.covers1624.quack.util.SneakyUtils.sneaky;
 import static net.minecraftforge.ir.Utils.makeParents;
+import static net.minecraftforge.ir.Utils.runWaitFor;
 
 /**
  * Created by covers1624 on 30/4/21.
@@ -65,11 +69,32 @@ public class InstallerRewriter {
 
     public static final String USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 Safari/537.36";
 
+    public static final URL VERSION_MANIFEST = sneaky(() -> new URL("https://launchermeta.mojang.com/mc/game/version_manifest.json"));
+
     public static final String FORGE_MAVEN = "https://maven.minecraftforge.net/";
     public static final String OLD_FORGE_MAVEN = "https://files.minecraftforge.net/maven/";
     public static final String MIRROR_LIST = "https://files.minecraftforge.net/mirrors-2.0.json";
 
     public static final String MOJANG_MAVEN = "https://libraries.minecraft.net/";
+    public static final String MAVEN_LOCAL = Paths.get(System.getProperty("user.home")).resolve(".m2/repository").toUri().toString();
+
+    // If this system property is provided, InstallerRewriter will favor using this repository over
+    // the Mojang and Forge mavens. This is intended purely for running installers with the InstallerTester sub-program.
+    public static final String FORCED_MAVEN = System.getProperty("ir.forced_maven");
+    public static final String[] MAVENS = SneakyUtils.sneaky(() -> {
+        List<String> mavens = new ArrayList<>();
+        if (FORCED_MAVEN != null) {
+            mavens.add(FORCED_MAVEN);
+        }
+        mavens.add(MOJANG_MAVEN);
+        mavens.add(FORGE_MAVEN);
+        return mavens.toArray(new String[0]);
+    });
+
+    // Forces the use of Local files in generated installers.
+    // Generated installers will have uri's to the CACHE_DIR instead of a real maven repository.
+    // This is intended for use with the InstallerTester sub-program.
+    public static final boolean USE_LOCAL_CACHE = Boolean.getBoolean("ir.use_local_cache");
 
     public static final String ICON = SneakyUtils.sneaky(() -> {
         try (InputStream is = InstallerRewriter.class.getResourceAsStream("/icon.ico")) {
@@ -177,6 +202,7 @@ public class InstallerRewriter {
 
         if (!inPlace && !optSet.has(outputPathOpt)) {
             LOGGER.error("Expected --output argument.");
+            return -1;
         }
 
         Path repoPath = optSet.valueOf(repoPathOpt);
@@ -388,39 +414,19 @@ public class InstallerRewriter {
     }
 
     public static void signJar(SignProps props, Path jarToSign) throws IOException {
-        Process process = new ProcessBuilder()
-                .command(asList(
-                        Utils.getJarSignExecutable().toAbsolutePath().toString(),
-                        "-keystore",
-                        props.keyStorePath.toAbsolutePath().toString(),
-                        "-storepass",
-                        props.keyStorePass,
-                        "-keypass",
-                        props.keyPass,
-                        jarToSign.toAbsolutePath().toString(),
-                        props.keyAlias
-                ))
-                .start();
-        CompletableFuture<Void> stdoutFuture = redirect(process.getInputStream());
-        CompletableFuture<Void> stderrFuture = redirect(process.getErrorStream());
-        try {
-            process.waitFor();
-        } catch (InterruptedException e) {
-            throw new RuntimeException(e);
-        }
-        if (!stdoutFuture.isDone()) stdoutFuture.cancel(true);
-        if (!stderrFuture.isDone()) stderrFuture.cancel(true);
-    }
-
-    public static CompletableFuture<Void> redirect(InputStream stream) {
-        return CompletableFuture.runAsync(SneakyUtils.sneak(() -> {
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    LOGGER.info("Sign: {}", line);
-                }
-            }
-        }));
+        runWaitFor("Sign", builder -> {
+            builder.command(asList(
+                    JavaPathUtils.getJarSignerExecutable().toAbsolutePath().toString(),
+                    "-keystore",
+                    props.keyStorePath.toAbsolutePath().toString(),
+                    "-storepass",
+                    props.keyStorePass,
+                    "-keypass",
+                    props.keyPass,
+                    jarToSign.toAbsolutePath().toString(),
+                    props.keyAlias
+            ));
+        });
     }
 
     public static void downloadFile(URL url, Path file) throws IOException {
@@ -428,6 +434,15 @@ public class InstallerRewriter {
     }
 
     public static void downloadFile(URL url, Path file, boolean forceDownload) throws IOException {
+        // OkHttp does not handle the file protocol.
+        if (url.getProtocol().equals("file")) {
+            try {
+                Files.createDirectories(file.getParent());
+                Files.copy(Paths.get(url.toURI()), file, StandardCopyOption.REPLACE_EXISTING);
+            } catch (URISyntaxException e) {
+                throw new RuntimeException("What.", e);
+            }
+        }
         Path tmp = file.resolveSibling(file.getFileName() + "__tmp");
         if (forceDownload && !recentFiles.contains(url.toString())) {
             Files.deleteIfExists(file);
@@ -464,6 +479,15 @@ public class InstallerRewriter {
     }
 
     public static boolean headRequest(URL url) throws IOException {
+        // OkHttp does not handle the file protocol.
+        if (url.getProtocol().equals("file")) {
+            try {
+                return Files.exists(Paths.get(url.toURI()));
+            } catch (URISyntaxException e) {
+                throw new RuntimeException("What.", e);
+            }
+        }
+
         Boolean recent = recentHeadRequests.get(url.toString());
         if (recent != null) {
             return recent;

@@ -26,29 +26,41 @@ import com.google.gson.GsonBuilder;
 import net.covers1624.quack.gson.MavenNotationAdapter;
 import net.covers1624.quack.maven.MavenNotation;
 import net.covers1624.quack.util.HashUtils;
+import net.covers1624.quack.util.ProcessUtils;
 import net.minecraftforge.ir.ClasspathEntry.LibraryClasspathEntry;
 import net.minecraftforge.ir.ClasspathEntry.StringClasspathEntry;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.maven.artifact.repository.metadata.Metadata;
 import org.apache.maven.artifact.repository.metadata.Versioning;
 import org.apache.maven.artifact.repository.metadata.io.xpp3.MetadataXpp3Reader;
 import org.codehaus.plexus.util.xml.pull.XmlPullParserException;
 
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.function.Consumer;
+import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
+
+import static net.covers1624.quack.util.SneakyUtils.sneak;
 
 /**
  * Created by covers1624 on 30/4/21.
  */
 @SuppressWarnings ("UnstableApiUsage")
 public class Utils {
+
+    public static final Logger LOGGER = LogManager.getLogger();
 
     private static final MetadataXpp3Reader METADATA_XPP3_READER = new MetadataXpp3Reader();
     private static final HashFunction SHA256 = Hashing.sha256();
@@ -57,9 +69,6 @@ public class Utils {
             .registerTypeAdapter(MavenNotation.class, new MavenNotationAdapter())
             .setPrettyPrinting()
             .create();
-
-    public static Path JAVA_HOME = calcJavaHome();
-    public static String EXE_SUFFIX = System.getProperty("os.name").contains("windows") ? ".exe" : "";
 
     public static List<String> parseVersions(Path file) throws IOException {
         if (Files.exists(file)) {
@@ -81,6 +90,12 @@ public class Utils {
             Files.createDirectories(file.getParent());
         }
         return file;
+    }
+
+    public static void delete(Path path) throws IOException {
+        try (Stream<Path> stream = Files.walk(path)) {
+            stream.sorted(Comparator.reverseOrder()).forEach(sneak(Files::delete));
+        }
     }
 
     public static boolean contentEquals(Path a, Path b) throws IOException {
@@ -145,19 +160,36 @@ public class Utils {
         return classpathEntries;
     }
 
-    public static Path getJavaExecutable() {
-        return JAVA_HOME.resolve("bin/java" + EXE_SUFFIX);
+    public static int runWaitFor(String logPrefix, Consumer<ProcessBuilder> configure) throws IOException {
+        return runWaitFor(configure, e -> LOGGER.info("{}: {}", logPrefix, e));
     }
 
-    public static Path getJarSignExecutable() {
-        return JAVA_HOME.resolve("bin/jarsigner" + EXE_SUFFIX);
-    }
+    public static int runWaitFor(Consumer<ProcessBuilder> configure, Consumer<String> consumer) throws IOException {
+        ProcessBuilder procBuilder = new ProcessBuilder();
+        configure.accept(procBuilder);
+        procBuilder.redirectErrorStream(true);
+        Process process = procBuilder.start();
 
-    public static Path calcJavaHome() {
-        Path home = Paths.get(System.getProperty("java.home")).toAbsolutePath().normalize();
-        if (home.getFileName().toString().equalsIgnoreCase("jre") && Files.exists(home.getParent().resolve("bin/java"))) {
-            return home.getParent();
+        CompletableFuture<Void> stdoutFuture = processLines(process.getInputStream(), consumer);
+        ProcessUtils.onExit(process).thenRunAsync(() -> {
+            if (!stdoutFuture.isDone()) stdoutFuture.cancel(true);
+        });
+        try {
+            process.waitFor();
+        } catch (InterruptedException e) {
+            LOGGER.warn("Interrupted.", e);
         }
-        return home;
+        return process.exitValue();
+    }
+
+    public static CompletableFuture<Void> processLines(InputStream stream, Consumer<String> consumer) {
+        return CompletableFuture.runAsync(sneak(() -> {
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    consumer.accept(line);
+                }
+            }
+        }));
     }
 }
