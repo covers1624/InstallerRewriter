@@ -91,7 +91,7 @@ public class InstallerV1Processor implements InstallerProcessor {
         }
     });
 
-    public static final MavenNotation LJF = MavenNotation.parse("net.minecraftforge:legacyjavafixer:2.0");
+    public static final MavenNotation LJF = MavenNotation.parse("net.minecraftforge:legacyjavafixer:2.0.0");
 
     @Override
     public void process(ProcessorContext ctx) throws IOException {
