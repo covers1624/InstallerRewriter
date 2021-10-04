@@ -1,6 +1,7 @@
 plugins {
     id 'java'
     id 'org.cadixdev.licenser' version '0.6.1'
+    id 'com.github.johnrengelman.shadow' version '7.0.0'
 }
 
 group 'net.minecraftforge'
@@ -21,17 +22,37 @@ repositories {
     maven { url 'https://maven.covers1624.net/' }
 }
 
+configurations {
+    shadow
+    api.extendsFrom shadow
+}
+
 dependencies {
-    implementation 'net.sf.jopt-simple:jopt-simple:5.0.4'
+    shadow 'net.sf.jopt-simple:jopt-simple:5.0.4'
 
-    implementation 'org.apache.logging.log4j:log4j-core:2.14.1'
+    shadow 'org.apache.logging.log4j:log4j-core:2.14.1'
 
-    implementation 'org.apache.maven:maven-repository-metadata:3.8.1'
-    implementation 'org.apache.maven:maven-artifact:3.8.1'
-    implementation 'org.apache.commons:commons-lang3:3.12.0'
-    implementation 'com.google.guava:guava:31.0.1-jre'
-    implementation 'com.google.code.gson:gson:2.8.8'
-    implementation 'net.covers1624:Quack:0.3.7.29'
+    shadow 'org.apache.maven:maven-repository-metadata:3.8.1'
+    shadow 'org.apache.maven:maven-artifact:3.8.1'
+    shadow 'org.apache.commons:commons-lang3:3.12.0'
+    shadow 'com.google.guava:guava:31.0.1-jre'
+    shadow 'com.google.code.gson:gson:2.8.8'
+    shadow 'net.covers1624:Quack:0.3.7.29'
 
-    implementation 'com.squareup.okhttp3:okhttp:4.9.1'
+    shadow 'com.squareup.okhttp3:okhttp:4.9.1'
+}
+
+jar.enabled = false
+shadowJar {
+    build.dependsOn it
+    configurations = [project.configurations.shadow]
+    classifier ''
+    manifest {
+        attributes 'Main-Class': 'net.minecraftforge.ir.InstallerRewriter'
+        attributes 'Multi-Release': 'true'
+    }
+
+    exclude 'module-info.class'
+    transform(com.github.jengelman.gradle.plugins.shadow.transformers.Log4j2PluginsCacheFileTransformer)
+    from file("LICENSE.txt")
 }
