@@ -1,11 +1,24 @@
+buildscript {
+    repositories {
+        mavenLocal()
+        jcenter()
+        maven { url "https://maven.minecraftforge.net/" }
+    }
+    dependencies {
+        classpath 'net.minecraftforge.gradleutils:GradleUtils:1.0.+'
+    }
+}
+
 plugins {
     id 'java'
     id 'org.cadixdev.licenser' version '0.6.1'
     id 'com.github.johnrengelman.shadow' version '7.0.0'
 }
 
+apply plugin: 'net.minecraftforge.gradleutils'
+
 group 'net.minecraftforge'
-version '1.0.0'
+version = gradleutils.tagOffsetVersion
 
 java.toolchain.languageVersion = JavaLanguageVersion.of(8)
 
