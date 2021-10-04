@@ -175,7 +175,7 @@ public class InstallerRewriter {
                 .requiredIf(signOpt)
                 .withRequiredArg();
 
-        OptionSpec<String> keyPassOpt = parser.acceptsAll(asList("keyPass"), "The password for key within the provide keystore.")
+        OptionSpec<String> keyPassOpt = parser.acceptsAll(asList("keyPass"), "The password for the key within the provided keystore.")
                 .availableIf(signOpt)
                 .requiredIf(signOpt)
                 .withRequiredArg();
