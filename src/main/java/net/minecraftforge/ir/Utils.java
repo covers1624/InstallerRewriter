@@ -23,6 +23,8 @@ import com.google.common.hash.HashFunction;
 import com.google.common.hash.Hashing;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
 import net.covers1624.quack.gson.MavenNotationAdapter;
 import net.covers1624.quack.maven.MavenNotation;
 import net.covers1624.quack.util.HashUtils;
@@ -52,6 +54,7 @@ import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
+import static java.util.Objects.requireNonNull;
 import static net.covers1624.quack.util.SneakyUtils.sneak;
 
 /**
@@ -69,6 +72,32 @@ public class Utils {
             .registerTypeAdapter(MavenNotation.class, new MavenNotationAdapter())
             .setPrettyPrinting()
             .create();
+
+    public static int getAsInt(JsonObject obj, String key) {
+        JsonElement element = requireNonNull(obj.get(key));
+        if (!element.isJsonPrimitive()) throw new IllegalArgumentException("Expected JsonPrimitive.");
+        return element.getAsJsonPrimitive().getAsInt();
+    }
+
+    public static int getAsInt(JsonObject obj, String key, int _default) {
+        JsonElement element = obj.get(key);
+        if (element == null) return _default;
+        if (!element.isJsonPrimitive()) return _default;
+        return element.getAsJsonPrimitive().getAsInt();
+    }
+
+    public static String getAsString(JsonObject obj, String key) {
+        JsonElement element = requireNonNull(obj.get(key));
+        if (!element.isJsonPrimitive()) throw new IllegalArgumentException("Expected JsonPrimitive.");
+        return element.getAsJsonPrimitive().getAsString();
+    }
+
+    public static String getAsString(JsonObject obj, String key, String _default) {
+        JsonElement element = obj.get(key);
+        if (element == null) return _default;
+        if (!element.isJsonPrimitive()) return _default;
+        return element.getAsJsonPrimitive().getAsString();
+    }
 
     public static List<String> parseVersions(Path file) throws IOException {
         if (Files.exists(file)) {

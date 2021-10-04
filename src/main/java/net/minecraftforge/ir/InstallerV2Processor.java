@@ -21,12 +21,12 @@ package net.minecraftforge.ir;
 import com.google.common.hash.HashCode;
 import com.google.common.hash.HashFunction;
 import com.google.common.hash.Hashing;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
 import net.covers1624.quack.io.CopyingFileVisitor;
 import net.covers1624.quack.io.IOUtils;
 import net.covers1624.quack.maven.MavenNotation;
 import net.covers1624.quack.util.HashUtils;
-import net.minecraftforge.ir.json.Install;
-import net.minecraftforge.ir.json.Version;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -40,10 +40,12 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.FileSystem;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Objects;
 import java.util.regex.Pattern;
 
+import static java.util.Objects.requireNonNull;
 import static net.minecraftforge.ir.InstallerRewriter.*;
+import static net.minecraftforge.ir.Utils.getAsInt;
+import static net.minecraftforge.ir.Utils.getAsString;
 
 /**
  * Installer V2 only needs to be copied over.
@@ -85,43 +87,46 @@ public class InstallerV2Processor implements InstallerProcessor {
         }
     }
 
+    // We don't use the object representation of these jsons as we don't want to accidentally nuke data from them.
     public byte[] rewriteInstallProfile(MavenNotation notation, InputStream is, Path jarRoot) throws IOException {
-        Install install;
+        JsonObject install;
         try (Reader reader = new InputStreamReader(is)) {
-            install = Utils.GSON.fromJson(reader, Install.class);
+            install = Utils.GSON.fromJson(reader, JsonObject.class);
         }
-        if (install.spec != 0) throw new IllegalStateException("Expected spec 0?");
+        if (getAsInt(install, "spec") != 0) throw new IllegalStateException("Expected spec 0?");
         boolean changes = false;
 
         // Rewrite the 'json'.
-        Path versionJson = jarRoot.resolve(Objects.requireNonNull(install.json));
+        String json = getAsString(install, "json");
+        Path versionJson = jarRoot.resolve(json);
         if (!Files.exists(versionJson)) {
-            throw new RuntimeException("Missing version json: " + install.json);
+            throw new RuntimeException("Missing version json: " + json);
         }
         byte[] bytes = rewriteVersionJson(notation, Files.newInputStream(versionJson), jarRoot);
         if (bytes != null) {
-            LOGGER.debug("Updating json {}.", install.json);
+            LOGGER.debug("Updating json {}.", json);
             Files.delete(versionJson);
             Files.write(versionJson, bytes);
         }
 
         // Ensure Mirror List exists and is updated.
-        if (install.mirrorList == null) {
+        String mirrorList = getAsString(install, "mirrorList", null);
+        if (mirrorList == null) {
             LOGGER.debug("Adding Mirror List to {}", notation);
-            install.mirrorList = MIRROR_LIST;
+            install.addProperty("mirrorList", MIRROR_LIST);
             changes = true;
         } else {
-            if (!install.mirrorList.equals(MIRROR_LIST)) {
-                LOGGER.debug("Updating Mirror List from {} to {}", install.mirrorList, MIRROR_LIST);
-                install.mirrorList = MIRROR_LIST;
-
+            if (!mirrorList.equals(MIRROR_LIST)) {
+                LOGGER.debug("Updating Mirror List from {} to {}", mirrorList, MIRROR_LIST);
+                install.addProperty("mirrorList", MIRROR_LIST);
                 changes = true;
             }
         }
 
         // Process all referenced libraries.
-        for (Version.Library library : install.getLibraries()) {
-            changes |= rewriteLibrary(library, notation, jarRoot);
+        for (JsonElement library : install.getAsJsonArray("libraries")) {
+            if (!library.isJsonObject()) throw new RuntimeException("Expected JsonObject.");
+            changes |= rewriteLibrary(library.getAsJsonObject(), notation, jarRoot);
         }
         if (!changes) return null;
 
@@ -129,15 +134,16 @@ public class InstallerV2Processor implements InstallerProcessor {
     }
 
     public byte[] rewriteVersionJson(MavenNotation notation, InputStream is, Path jarRoot) throws IOException {
-        Version version;
+        JsonObject version;
         try (Reader reader = new InputStreamReader(is)) {
-            version = Utils.GSON.fromJson(reader, Version.class);
+            version = Utils.GSON.fromJson(reader, JsonObject.class);
         }
         boolean changes = false;
 
         // Process all referenced libraries.
-        for (Version.Library library : version.getLibraries()) {
-            changes |= rewriteLibrary(library, notation, jarRoot);
+        for (JsonElement library : version.getAsJsonArray("libraries")) {
+            if (!library.isJsonObject()) throw new RuntimeException("Expected JsonObject.");
+            changes |= rewriteLibrary(library.getAsJsonObject(), notation, jarRoot);
         }
 
         if (!changes) return null;
@@ -146,16 +152,16 @@ public class InstallerV2Processor implements InstallerProcessor {
     }
 
     // Rewrite the library entry.
-    public static boolean rewriteLibrary(Version.Library lib, MavenNotation notation, Path jarRoot) throws IOException {
+    public static boolean rewriteLibrary(JsonObject lib, MavenNotation notation, Path jarRoot) throws IOException {
         boolean changes = false;
-        MavenNotation name = Objects.requireNonNull(lib.name);
-        Version.Downloads downloads = Objects.requireNonNull(lib.downloads);
-        Version.LibraryDownload artifact = Objects.requireNonNull(downloads.artifact);
+        MavenNotation name = MavenNotation.parse(getAsString(lib, "name"));
+        JsonObject downloads = requireNonNull(lib.getAsJsonObject("downloads"));
+        JsonObject artifact = requireNonNull(downloads.getAsJsonObject("artifact"));
 
-        String path = Objects.requireNonNull(artifact.path);
-        String url = Objects.requireNonNull(artifact.url);
-        String expectedSha1 = Objects.requireNonNull(artifact.sha1);
-        int expectedLen = Objects.requireNonNull(artifact.size);
+        String path = getAsString(artifact, "path");
+        String url = getAsString(artifact, "url");
+        String expectedSha1 = getAsString(artifact, "sha1");
+        int expectedLen = getAsInt(artifact, "size");
 
         //Rewrite the URL to the new maven.
         String origUrl = url;
@@ -167,7 +173,7 @@ public class InstallerV2Processor implements InstallerProcessor {
         }
         if (!origUrl.equals(url)) {
             LOGGER.debug("Rewrote URL from {} to {} in {}", origUrl, url, notation);
-            artifact.url = url;
+            artifact.addProperty("url", url);
             changes = true;
         }
 
@@ -191,14 +197,14 @@ public class InstallerV2Processor implements InstallerProcessor {
         // Validate the artifact hash matches.
         if (!HashUtils.equals(computedHash, expectedSha1)) {
             LOGGER.warn("Corrected incorrect hash for {}, From: {}, To: {}", name, expectedSha1, computedHash);
-            artifact.sha1 = computedHash.toString();
+            artifact.addProperty("sha1", computedHash.toString());
             changes = true;
         }
 
         // Validate the artifact length matches.
         if (expectedLen != computedLength) {
             LOGGER.warn("Corrected incorrect file length for {}, From: {}, To: {}", name, expectedLen, computedLength);
-            artifact.size = computedLength; //If a 4GB library is added, there is other problems.
+            artifact.addProperty("size", computedLength);
             changes = true;
         }
         return changes;
