@@ -58,8 +58,8 @@ public class InstallerV2Processor implements InstallerProcessor {
     private static final Logger LOGGER = LogManager.getLogger();
     private static final HashFunction SHA1 = Hashing.sha1();
 
-    //Any files in /maven, any json or txt files in the root directory.
-    private static final Pattern PATTERN = Pattern.compile("^/$|^/maven/|^/.*\\.txt|^/.*\\.json");
+    // Exclude any classes and the META-INF folder from being copied over.
+    private static final Pattern PATTERN = Pattern.compile("^/META-INF/.*$|/.*.class$");
 
     @Override
     public void process(ProcessorContext ctx) throws IOException {
@@ -69,8 +69,8 @@ public class InstallerV2Processor implements InstallerProcessor {
         ) {
             Path oldJarRoot = oldFs.getPath("/");
             Path newJarRoot = newFs.getPath("/");
-            // Copy everything that matches the regex above.
-            Files.walkFileTree(oldJarRoot, new CopyingFileVisitor(oldJarRoot, newJarRoot, e -> PATTERN.matcher("/" + e.toString()).find()));
+            // Copy everything that is not matched by the regex above.
+            Files.walkFileTree(oldJarRoot, new CopyingFileVisitor(oldJarRoot, newJarRoot, e -> !PATTERN.matcher("/" + e.toString()).find()));
 
             Path profileJson = newJarRoot.resolve("install_profile.json");
             if (!Files.exists(profileJson)) {
