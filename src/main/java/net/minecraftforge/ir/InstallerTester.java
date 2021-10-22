@@ -252,7 +252,7 @@ public class InstallerTester {
                     report.runLog.add(line);
                     lastOutput.set(System.currentTimeMillis());
                     //We found the 'Done' line, server has started successfully.
-                    if (line.contains("Done") && line.contains("\"help\" or \"?\"")) {
+                    if (line.contains("Done") && line.contains("\"help\"")) {
                         finishedStarting.set(true);
                     }
                     LOGGER.debug("Server: {}", line);
