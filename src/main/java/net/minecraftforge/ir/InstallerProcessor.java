@@ -30,5 +30,5 @@ public interface InstallerProcessor {
      *
      * @param ctx The context.
      */
-    void process(ProcessorContext ctx) throws IOException;
+    boolean process(ProcessorContext ctx) throws IOException;
 }

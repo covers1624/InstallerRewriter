@@ -25,7 +25,6 @@ import static net.minecraftforge.ir.Utils.getAsInt;
 import static net.minecraftforge.ir.Utils.getAsString;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.Reader;
 import java.nio.charset.StandardCharsets;
@@ -50,7 +49,7 @@ public class MavenUrlProcessor implements InstallerProcessor {
     private static final String MIRROR_BRAND = "https://files.minecraftforge.net/mirror-brand.list";
 
     @Override
-    public void process(ProcessorContext ctx) throws IOException {
+    public boolean process(ProcessorContext ctx) throws IOException {
         Pair<Path, Path> pathPair = ctx.getFile(ctx.installer);
         try (FileSystem oldFs = IOUtils.getJarFileSystem(pathPair.getLeft(), true);
              FileSystem newFs = IOUtils.getJarFileSystem(pathPair.getRight(), true)
@@ -60,39 +59,41 @@ public class MavenUrlProcessor implements InstallerProcessor {
 
             Files.walkFileTree(oldJarRoot, new CopyingFileVisitor(oldJarRoot, newJarRoot, e -> true));
 
-            Path profileJson = newJarRoot.resolve("install_profile.json");
-            if (!Files.exists(profileJson)) {
-                LOGGER.error("Missing install_profile.json {}", ctx.notation);
-                return;
-            }
 
-            FileTime modified = Files.getLastModifiedTime(profileJson);
-            byte[] bytes = rewriteInstallProfile(ctx.notation, Files.newInputStream(profileJson), newJarRoot);
-            if (bytes != null) {
-                LOGGER.debug("Updating install_profile.json for {}", ctx.notation);
-                Files.delete(profileJson);
-                Files.write(profileJson, bytes);
-                Files.setLastModifiedTime(profileJson, modified);
-            }
+            return rewriteInstallProfile(ctx.notation, oldJarRoot, newJarRoot);
         }
     }
 
     // We don't use the object representation of these jsons as we don't want to accidentally nuke data from them.
-    public byte[] rewriteInstallProfile(MavenNotation notation, InputStream is, Path jarRoot) throws IOException {
+    private boolean rewriteInstallProfile(MavenNotation notation, Path oldJarRoot, Path newJarRoot) throws IOException {
+        Path profileJson = newJarRoot.resolve("install_profile.json");
+        if (!Files.exists(profileJson)) {
+            LOGGER.error("Missing install_profile.json {}", notation);
+            return false;
+        }
+
+        FileTime modified = Files.getLastModifiedTime(profileJson);
+
         JsonObject install;
-        try (Reader reader = new InputStreamReader(is)) {
+        try (Reader reader = new InputStreamReader(Files.newInputStream(profileJson))) {
             install = Utils.GSON.fromJson(reader, JsonObject.class);
         }
+
         boolean changed = false;
         if (!install.has("spec"))
             changed = rewriteInstallProfileV1(notation, install);
         else
-            changed = rewriteInstallProfileV2(notation, install, jarRoot);
+            changed = rewriteInstallProfileV2(notation, install, newJarRoot);
 
         if (!changed)
-            return null;
+            return false;
 
-        return Utils.GSON.toJson(install).getBytes(StandardCharsets.UTF_8);
+        byte[] bytes = Utils.GSON.toJson(install).getBytes(StandardCharsets.UTF_8);
+        LOGGER.debug("Updating install_profile.json for {}", notation);
+        Files.delete(profileJson);
+        Files.write(profileJson, bytes);
+        Files.setLastModifiedTime(profileJson, modified);
+        return true;
     }
 
     private boolean rewriteInstallProfileV1(MavenNotation notation, JsonObject profile) {
@@ -110,8 +111,6 @@ public class MavenUrlProcessor implements InstallerProcessor {
             install.addProperty("mirrorList", MIRROR_BRAND);
             changed = true;
         } else if (!mirrorList.equals(MIRROR_BRAND)) {
-            if (!mirrorList.replace("http:", "https:").equals(MIRROR_BRAND))
-                System.currentTimeMillis();
             LOGGER.debug("Updating Mirror List from {} to {}", mirrorList, MIRROR_BRAND);
             install.addProperty("mirrorList", MIRROR_BRAND);
             changed = true;
@@ -121,7 +120,8 @@ public class MavenUrlProcessor implements InstallerProcessor {
     }
 
     private boolean rewriteInstallProfileV2(MavenNotation notation, JsonObject install, Path jarRoot) throws IOException {
-        if (getAsInt(install, "spec") != 0) throw new IllegalStateException("Expected spec 0?");
+        if (getAsInt(install, "spec") != 0)
+            return false;
         boolean changed = false;
 
         // Rewrite the 'json'.
@@ -142,6 +142,7 @@ public class MavenUrlProcessor implements InstallerProcessor {
             Files.delete(versionJson);
             Files.write(versionJson, Utils.GSON.toJson(install).getBytes(StandardCharsets.UTF_8));
             Files.setLastModifiedTime(versionJson, modified);
+            changed = true;
         }
 
         // Ensure Mirror List exists and is updated.
@@ -181,7 +182,7 @@ public class MavenUrlProcessor implements InstallerProcessor {
         if (lib.has("downloads")) {
             JsonObject downloads = lib.getAsJsonObject("downloads");
             if (downloads.has("artifact")) {
-                changed |= rewriteUrl(notation, downloads.getAsJsonObject("artifect"));
+                changed |= rewriteUrl(notation, downloads.getAsJsonObject("artifact"));
             }
             if (downloads.has("classifiers")) {
                 JsonObject classifiers = lib.getAsJsonObject("classifiers");

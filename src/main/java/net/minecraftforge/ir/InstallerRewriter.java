@@ -326,7 +326,7 @@ public class InstallerRewriter {
         LOGGER.info("[{}/{}] Found probable format: {}", idx, total, probableFormat);
 
         //List if files that need to be re hashed/signed
-        List<Path> modifiedFiles = new ArrayList<>();
+        List<Pair<Path, Path>> modifiedFiles = new ArrayList<>();
         ProcessorContext ctx = new ProcessorContext(notation, installer, repo) {
             @Override
             public Pair<Path, Path> getFile(MavenNotation notation) throws IOException {
@@ -335,13 +335,12 @@ public class InstallerRewriter {
                 if (inPlace) {
                     Path backupFile = notation.toPath(backupPath);
                     moveWithAssociated(repoFile, backupFile);
-                    modifiedFiles.add(repoFile);
                     pair = Pair.of(backupFile, repoFile);
                 } else {
                     Path outFile = notation.toPath(outputPath);
-                    modifiedFiles.add(outFile);
                     pair = Pair.of(repoFile, outFile);
                 }
+                modifiedFiles.add(pair);
                 if (notation.equals(installer)) {
                     Files.copy(latestInstaller, makeParents(pair.getRight()), StandardCopyOption.REPLACE_EXISTING);
                 }
@@ -373,23 +372,34 @@ public class InstallerRewriter {
         else
             processor = PROCESSORS.get(probableFormat);
 
-        processor.process(ctx);
+        boolean changed = processor.process(ctx);
         LOGGER.info("[{}/{}] Processing finished!", idx, total);
 
-        for (Path file : modifiedFiles) {
-            //Re-sign all modified files.
-            if (signProps != null) {
-                signJar(signProps, file);
-            }
+        for (Pair<Path, Path> file : modifiedFiles) {
+            Path original = file.getLeft();
+            Path modified = file.getRight();
+            if (!changed) {
+                Files.delete(modified);
+                if (inPlace) {
+                    moveWithAssociated(original, modified); // Move the old file back
+                } else {
+                    Files.delete(modified.getParent()); // Delete parent directory if empty
+                }
+            } else {
+                //Re-sign all modified files.
+                if (signProps != null) {
+                    signJar(signProps, modified);
+                }
 
-            MultiHasher hasher = new MultiHasher(HASH_FUNCS);
-            hasher.load(file);
-            MultiHasher.HashResult result = hasher.finish();
-            for (Map.Entry<MultiHasher.HashFunc, HashCode> entry : result.entrySet()) {
-                Path hashFile = file.resolveSibling(file.getFileName() + "." + entry.getKey().name.toLowerCase());
-                try (PrintWriter out = new PrintWriter(Files.newBufferedWriter(hashFile))) {
-                    out.print(entry.getValue().toString());
-                    out.flush();
+                MultiHasher hasher = new MultiHasher(HASH_FUNCS);
+                hasher.load(modified);
+                MultiHasher.HashResult result = hasher.finish();
+                for (Map.Entry<MultiHasher.HashFunc, HashCode> entry : result.entrySet()) {
+                    Path hashFile = modified.resolveSibling(modified.getFileName() + "." + entry.getKey().name.toLowerCase());
+                    try (PrintWriter out = new PrintWriter(Files.newBufferedWriter(hashFile))) {
+                        out.print(entry.getValue().toString());
+                        out.flush();
+                    }
                 }
             }
         }

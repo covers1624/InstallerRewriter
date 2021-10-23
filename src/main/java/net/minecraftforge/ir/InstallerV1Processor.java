@@ -98,7 +98,7 @@ public class InstallerV1Processor implements InstallerProcessor {
             MavenNotation.parse("net.minecraftforge:legacyjavafixer:2.0.0");
 
     @Override
-    public void process(ProcessorContext ctx) throws IOException {
+    public boolean process(ProcessorContext ctx) throws IOException {
         boolean requiresLJF = requiresLJF(ctx.notation);
         MavenNotation baseNotation = ctx.notation.withClassifier(null).withExtension("jar");
         MavenNotation uniNotation = baseNotation.withClassifier("universal");
@@ -113,7 +113,7 @@ public class InstallerV1Processor implements InstallerProcessor {
             Path oldProfileFile = oldJarRoot.resolve("install_profile.json");
             if (Files.notExists(oldProfileFile)) {
                 LOGGER.error("Old installer does not have 'install_profile.json'");
-                return;
+                return false;
             }
 
             V1InstallProfile v1Profile;
@@ -126,14 +126,14 @@ public class InstallerV1Processor implements InstallerProcessor {
             Path oldUniversalJar = oldJarRoot.resolve(filePathStr);
             if (!Files.exists(oldUniversalJar)) {
                 LOGGER.error("'filePath' does not exist in old jar. {}", filePathStr);
-                return;
+                return false;
             }
 
             Path newUniversalJar = newJarRoot.resolve("maven").resolve(baseNotation.toPath());
             Path repoUniversalJar = uniNotation.toPath(ctx.repoPath);
             if (!Files.exists(repoUniversalJar)) {
                 LOGGER.error("Missing universal jar in configured repository, you dummy. /me looks at AterAnimAvis");
-                return;
+                return false;
             }
             if (!Utils.contentEquals(oldUniversalJar, repoUniversalJar)) {
                 LOGGER.warn("Old installer universal jar differs from repo universal jar!");
@@ -206,6 +206,8 @@ public class InstallerV1Processor implements InstallerProcessor {
             copyTime(oldProfileFile, newJarRoot.resolve("install_profile.json"));
             Files.write(newJarRoot.resolve("version.json"), Utils.GSON.toJson(version).getBytes(StandardCharsets.UTF_8));
             copyTime(oldProfileFile, newJarRoot.resolve("version.json"));
+
+            return true;
         }
     }
 

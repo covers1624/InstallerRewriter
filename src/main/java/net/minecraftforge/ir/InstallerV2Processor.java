@@ -62,7 +62,7 @@ public class InstallerV2Processor implements InstallerProcessor {
     private static final Pattern PATTERN = Pattern.compile("^/META-INF/.*$|/.*.class$");
 
     @Override
-    public void process(ProcessorContext ctx) throws IOException {
+    public boolean process(ProcessorContext ctx) throws IOException {
         Pair<Path, Path> pathPair = ctx.getFile(ctx.installer);
         try (FileSystem oldFs = IOUtils.getJarFileSystem(pathPair.getLeft(), true);
              FileSystem newFs = IOUtils.getJarFileSystem(pathPair.getRight(), true)
@@ -75,7 +75,7 @@ public class InstallerV2Processor implements InstallerProcessor {
             Path profileJson = newJarRoot.resolve("install_profile.json");
             if (!Files.exists(profileJson)) {
                 LOGGER.error("Missing install_profile.json {}", ctx.notation);
-                return;
+                return false;
             }
 
             byte[] bytes = rewriteInstallProfile(ctx.notation, Files.newInputStream(profileJson), newJarRoot);
@@ -83,7 +83,9 @@ public class InstallerV2Processor implements InstallerProcessor {
                 LOGGER.debug("Updating install_profile.json for {}", ctx.notation);
                 Files.delete(profileJson);
                 Files.write(profileJson, bytes);
+                return true;
             }
+            return false;
         }
     }
 
