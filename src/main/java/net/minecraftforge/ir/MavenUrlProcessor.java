@@ -73,9 +73,9 @@ public class MavenUrlProcessor implements InstallerProcessor {
 
             Files.walkFileTree(oldJarRoot, new CopyingFileVisitor(oldJarRoot, newJarRoot, e -> true));
 
-
             boolean changed = rewriteInstallProfile(ctx.notation, oldJarRoot, newJarRoot);
             changed |= validateSignatures(newJarRoot);
+            Files.setLastModifiedTime(pathPair.getRight(), Files.getLastModifiedTime(pathPair.getLeft()));
             return changed;
         }
     }
@@ -156,7 +156,7 @@ public class MavenUrlProcessor implements InstallerProcessor {
             LOGGER.debug("Updating json {}.", json);
             FileTime modified = Files.getLastModifiedTime(versionJson);
             Files.delete(versionJson);
-            Files.write(versionJson, Utils.GSON.toJson(install).getBytes(StandardCharsets.UTF_8));
+            Files.write(versionJson, Utils.GSON.toJson(version).getBytes(StandardCharsets.UTF_8));
             Files.setLastModifiedTime(versionJson, modified);
             changed = true;
         }
