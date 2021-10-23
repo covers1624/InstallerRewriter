@@ -61,17 +61,31 @@ public class Version {
         public String url;
         public String sha1;
         public Integer size;
+
+        @Override
+        public String toString() {
+            return "Download[" + this.sha1 + ", " + this.size + ", " + this.url + "]";
+        }
     }
 
     public static class LibraryDownload extends Download {
-
         public String path;
+
+        @Override
+        public String toString() {
+            return this.path;
+        }
     }
 
     public static class Library {
 
         public MavenNotation name;
         public Downloads downloads;
+
+        @Override
+        public String toString() {
+            return this.name.toString();
+        }
     }
 
     public static class Downloads {

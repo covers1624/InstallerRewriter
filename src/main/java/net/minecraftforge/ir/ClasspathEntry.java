@@ -74,6 +74,11 @@ public interface ClasspathEntry {
         public int hashCode() {
             return notation.hashCode();
         }
+
+        @Override
+        public String toString() {
+            return this.toPath();
+        }
     }
 
     class StringClasspathEntry implements ClasspathEntry {
@@ -108,6 +113,11 @@ public interface ClasspathEntry {
         @Override
         public int hashCode() {
             return path.hashCode();
+        }
+
+        @Override
+        public String toString() {
+            return this.toPath();
         }
     }
 }

@@ -157,6 +157,9 @@ public class InstallerRewriter {
                 .withRequiredArg()
                 .withValuesConvertedBy(new PathConverter());
 
+
+        OptionSpec<Void> urlFixesOpt =  parser.acceptsAll(asList("u", "url-only"), "Will only run the maven URL updating processor.");
+
         //Signing
         OptionSpec<Void> signOpt = parser.acceptsAll(asList("sign"), "If jars should be signed or not.");
         OptionSpec<Path> keyStoreOpt = parser.acceptsAll(asList("keyStore"), "The keystore to use for signing.")
@@ -230,6 +233,8 @@ public class InstallerRewriter {
             signProps.keyPass = optSet.valueOf(keyPassOpt);
         }
 
+        boolean urlFixesOnly = optSet.has(urlFixesOpt);
+
         LOGGER.info("Resolving latest Forge installer..");
         MavenNotation installerNotation = MavenNotation.parse(optSet.valueOf(installerCoordsOpt));
         MavenNotation latestInstaller = resolveLatestInstaller(installerNotation);
@@ -253,6 +258,7 @@ public class InstallerRewriter {
                 .collect(Collectors.toList());
 
         if (optSet.has(validateMetadataOpt)) {
+            LOGGER.info("");
             LOGGER.info("Reading maven-metadata.xml");
             List<String> versions = Utils.parseVersions(moduleFolder.resolve("maven-metadata.xml"));
             Set<String> versionSet = new HashSet<>(versions);
@@ -280,17 +286,19 @@ public class InstallerRewriter {
             }
         }
 
+        LOGGER.info("");
+
         LOGGER.info("Sorting version lists..");
         folderVersions.sort(Comparator.comparing(ComparableVersion::new));
         LOGGER.info("Processing versions..");
-        for (String version : folderVersions) {
-            processVersion(signProps, forgeNotation.withVersion(version), repoPath, backupPath, outputPath, latestInstallerPath);
+        for (int x = 0; x < folderVersions.size(); x++) {
+            processVersion(signProps, forgeNotation.withVersion(folderVersions.get(x)), repoPath, backupPath, outputPath, latestInstallerPath, urlFixesOnly, x, folderVersions.size());
         }
 
         return 0;
     }
 
-    public static void processVersion(SignProps signProps, MavenNotation notation, Path repo, @Nullable Path backupPath, @Nullable Path outputPath, Path latestInstaller) throws IOException {
+    private static void processVersion(SignProps signProps, MavenNotation notation, Path repo, @Nullable Path backupPath, @Nullable Path outputPath, Path latestInstaller, boolean urlFixesOnly, int idx, int total) throws IOException {
         if (notation.version.startsWith("1.5.2-")) return; //TODO Temporary
 
         boolean inPlace = backupPath != null;
@@ -299,10 +307,11 @@ public class InstallerRewriter {
         Path repoInstallerPath = installer.toPath(repo);
 
         if (Files.notExists(repoInstallerPath)) {
-            LOGGER.warn("Missing installer for: {}", notation);
+            LOGGER.warn("[{}/{}] Missing installer for: {}", idx, total, notation);
             return;
         }
-        LOGGER.info("Found installer jar for: {}", notation);
+        LOGGER.info("");
+        LOGGER.info("[{}/{}] Found installer jar for: {}", idx, total, notation);
 
         //Attempt to detect the installer format.
         InstallerFormat probableFormat;
@@ -314,7 +323,7 @@ public class InstallerRewriter {
                 return;
             }
         }
-        LOGGER.info("Found probable format: {}", probableFormat);
+        LOGGER.info("[{}/{}] Found probable format: {}", idx, total, probableFormat);
 
         //List if files that need to be re hashed/signed
         List<Path> modifiedFiles = new ArrayList<>();
@@ -347,14 +356,25 @@ public class InstallerRewriter {
             if (Files.exists(winFile)) {
                 moveWithAssociated(winFile, winNotation.toPath(backupPath));
             }
+
+            //Move javadoc zips.. Its 10 GB of useless space.
+            MavenNotation docNotation = installer.withClassifier("javadoc").withClassifier("zip");
+            Path docFile = docNotation.toPath(repo);
+            if (Files.exists(docFile)) {
+                moveWithAssociated(docFile, docNotation.toPath(backupPath));
+            }
         }
 
-        LOGGER.info("Processing {}..", notation);
+        LOGGER.info("[{}/{}] Processing {}..", idx, total, notation);
 
-        InstallerProcessor processor = PROCESSORS.get(probableFormat);
+        InstallerProcessor processor = null;
+        if (urlFixesOnly)
+            processor = new MavenUrlProcessor();
+        else
+            processor = PROCESSORS.get(probableFormat);
 
         processor.process(ctx);
-        LOGGER.info("Processing finished!");
+        LOGGER.info("[{}/{}] Processing finished!", idx, total);
 
         for (Path file : modifiedFiles) {
             //Re-sign all modified files.

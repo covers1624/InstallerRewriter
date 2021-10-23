@@ -43,6 +43,7 @@ import java.io.*;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.FileSystem;
+import java.nio.file.attribute.FileTime;
 import java.nio.file.*;
 import java.util.*;
 import java.util.jar.Attributes;
@@ -80,6 +81,7 @@ public class InstallerV1Processor implements InstallerProcessor {
         PER_VERSION_TABLE.put("1.6.4", MavenNotation.parse("net.minecraft:launchwrapper:1.3"), MavenNotation.parse("net.minecraft:launchwrapper:1.7"));
     }
 
+    private static final boolean LJF2 = false;
     private static final String SERVER_MAIN = "net.minecraftforge.legacyjavafixer.sort.ServerWrapper";
     private static final String CLIENT_MAIN = "net.minecraftforge.legacyjavafixer.sort.ClientWrapper";
 
@@ -91,7 +93,9 @@ public class InstallerV1Processor implements InstallerProcessor {
         }
     });
 
-    public static final MavenNotation LJF = MavenNotation.parse("net.minecraftforge:legacyjavafixer:2.0.0");
+    public static final MavenNotation LJF = !LJF2 ?
+            MavenNotation.parse("net.minecraftforge.lex:legacyjavafixer:1.0") :
+            MavenNotation.parse("net.minecraftforge:legacyjavafixer:2.0.0");
 
     @Override
     public void process(ProcessorContext ctx) throws IOException {
@@ -150,6 +154,7 @@ public class InstallerV1Processor implements InstallerProcessor {
                 try (FileSystem uniFs = IOUtils.getJarFileSystem(uniPair.getRight(), true)) {
                     Path uniRoot = uniFs.getPath("/");
                     Path manifestFile = uniRoot.resolve("META-INF/MANIFEST.MF");
+                    FileTime modified = Files.getLastModifiedTime(manifestFile);
                     java.util.jar.Manifest manifest;
                     try (InputStream is = Files.newInputStream(manifestFile)) {
                         manifest = new java.util.jar.Manifest(is);
@@ -175,6 +180,7 @@ public class InstallerV1Processor implements InstallerProcessor {
                         manifest.write(os);
                         os.flush();
                     }
+                    Files.setLastModifiedTime(manifestFile, modified);
                 }
                 Files.copy(uniPair.getRight(), makeParents(newUniversalJar));
             } else {
@@ -197,8 +203,15 @@ public class InstallerV1Processor implements InstallerProcessor {
             forgeLib.downloads = downloads;
 
             Files.write(newJarRoot.resolve("install_profile.json"), Utils.GSON.toJson(install).getBytes(StandardCharsets.UTF_8));
+            copyTime(oldProfileFile, newJarRoot.resolve("install_profile.json"));
             Files.write(newJarRoot.resolve("version.json"), Utils.GSON.toJson(version).getBytes(StandardCharsets.UTF_8));
+            copyTime(oldProfileFile, newJarRoot.resolve("version.json"));
         }
+    }
+
+    private void copyTime(Path from, Path to) throws IOException {
+        FileTime last = Files.getLastModifiedTime(from);
+        Files.setLastModifiedTime(to, last);
     }
 
     public static Install generateInstallProfile(ProcessorContext ctx, Path newFilePath) throws IOException {
@@ -437,13 +450,16 @@ public class InstallerV1Processor implements InstallerProcessor {
     }
 
     public static void applyLJFManifest(java.util.jar.Manifest manifest) {
+        if (!LJF2)
+            return;
         Attributes mainAttribs = manifest.getMainAttributes();
         // Set the server-side Main-Class attribute for the universal jar when LJF is required.
         mainAttribs.put(new Attributes.Name("Main-Class"), SERVER_MAIN);
     }
 
     public static void applyLJFVersion(Version version, V1InstallProfile.VersionInfo v1VersionInfo, List<ClasspathEntry> classpathLibraries) {
-        version.mainClass = CLIENT_MAIN;
+        if (LJF2)
+            version.mainClass = CLIENT_MAIN;
 
         // Find the last Library entry to append after.
         int lastLibraryEntry = Math.max(0, classpathLibraries.size() - 1);
@@ -459,10 +475,12 @@ public class InstallerV1Processor implements InstallerProcessor {
         lib.name = LJF;
         v1VersionInfo.libraries.add(lib);
 
-        // Append a Classpath entry to the universal jar.
-        ClasspathEntry.LibraryClasspathEntry ent = new ClasspathEntry.LibraryClasspathEntry(LJF);
-        ent.modified = true;
-        classpathLibraries.add(lastLibraryEntry, ent);
+        if (LJF2) {
+            // Append a Classpath entry to the universal jar.
+            ClasspathEntry.LibraryClasspathEntry ent = new ClasspathEntry.LibraryClasspathEntry(LJF);
+            ent.modified = true;
+            classpathLibraries.add(lastLibraryEntry, ent);
+        }
     }
 
     // Determine the repository to use for the library, if mojang has it, prefer that.
