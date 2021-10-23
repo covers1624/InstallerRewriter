@@ -18,6 +18,7 @@
  */
 package net.minecraftforge.ir;
 
+import static net.covers1624.quack.util.SneakyUtils.sneak;
 import static net.minecraftforge.ir.InstallerRewriter.FORGE_MAVEN;
 import static net.minecraftforge.ir.InstallerRewriter.MIRROR_LIST;
 import static net.minecraftforge.ir.InstallerRewriter.OLD_FORGE_MAVEN;
@@ -25,24 +26,37 @@ import static net.minecraftforge.ir.Utils.getAsInt;
 import static net.minecraftforge.ir.Utils.getAsString;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.io.Reader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.FileSystem;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.FileTime;
+import java.util.Base64;
+import java.util.Iterator;
+import java.util.Map.Entry;
+import java.util.jar.Attributes;
+import java.util.jar.Manifest;
+import java.util.stream.Collectors;
 
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import com.google.common.hash.HashCode;
+import com.google.common.hash.HashFunction;
+import com.google.common.hash.Hashing;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 
 import net.covers1624.quack.io.CopyingFileVisitor;
 import net.covers1624.quack.io.IOUtils;
 import net.covers1624.quack.maven.MavenNotation;
+import net.covers1624.quack.util.HashUtils;
 
 public class MavenUrlProcessor implements InstallerProcessor {
     private static final Logger LOGGER = LogManager.getLogger();
@@ -60,7 +74,9 @@ public class MavenUrlProcessor implements InstallerProcessor {
             Files.walkFileTree(oldJarRoot, new CopyingFileVisitor(oldJarRoot, newJarRoot, e -> true));
 
 
-            return rewriteInstallProfile(ctx.notation, oldJarRoot, newJarRoot);
+            boolean changed = rewriteInstallProfile(ctx.notation, oldJarRoot, newJarRoot);
+            changed |= validateSignatures(newJarRoot);
+            return changed;
         }
     }
 
@@ -220,4 +236,74 @@ public class MavenUrlProcessor implements InstallerProcessor {
         return false;
     }
 
+    private static boolean validateSignatures(Path root) throws IOException {
+        boolean invalid = false;
+        Path manifest = root.resolve("META-INF/MANIFEST.MF");
+        if (!Files.exists(manifest))
+            return false;
+
+        Manifest mf = null;
+        try (InputStream is = Files.newInputStream(manifest)) {
+            mf = new Manifest(is);
+        }
+
+        for (Entry<String, Attributes> entry : mf.getEntries().entrySet()) {
+            String name = entry.getKey().toString();
+            Path target = root.resolve(name);
+
+            for (String key : entry.getValue().keySet().stream().map(Object::toString).collect(Collectors.toList())) {
+                if (key.endsWith("-Digest")) {
+                    if (!Files.exists(target) || !Files.isRegularFile(target)) // Hashes can exist in the manifest even if the files dont exist.
+                        continue;
+
+                    HashFunction func = null;
+                    switch (key.substring(0, key.length() - "-Digest".length())) {
+                        case "SHA-256": func = Hashing.sha256(); break; // Only one i've seen, but might as well support he others.
+                        case "SHA-1":   func = Hashing.sha1();   break;
+                        case "SHA-512": func = Hashing.sha512(); break;
+                        case "MD5":     func = Hashing.md5();    break;
+                        default: throw new IOException("Unknown manifest signature format: " + key);
+                    }
+                    String actual = HashUtils.hash(func, target).toString();
+                    String expected = HashCode.fromBytes(Base64.getDecoder().decode(entry.getValue().getValue(key))).toString();
+                    if (!expected.equals(actual)) {
+                        LOGGER.info("Installer manifest hash mismatch, stripping signatures");
+                        invalid = true;
+                        break;
+                    }
+                }
+            }
+
+            if (invalid)
+                break;
+        }
+
+        if (invalid) {
+            // cleanup manifest
+            Iterator<Entry<String, Attributes>> itr = mf.getEntries().entrySet().iterator();
+            while (itr.hasNext()) {
+                Entry<String, Attributes> entry = itr.next();
+                Attributes attrs = entry.getValue();
+                attrs.keySet().removeIf(e -> e.toString().endsWith("-Digest"));
+                if (attrs.isEmpty())
+                    itr.remove();
+            }
+            FileTime modified = Files.getLastModifiedTime(manifest);
+            try (OutputStream os = Files.newOutputStream(manifest, StandardOpenOption.TRUNCATE_EXISTING)) {
+                mf.write(os);
+                os.flush();
+            }
+            Files.setLastModifiedTime(manifest, modified);
+
+            Files.list(root.resolve("META-INF"))
+            .filter(Files::isRegularFile)
+            .filter(e -> {
+                // Find all signing metadata files.
+                String s = e.getFileName().toString();
+                return s.endsWith(".SF") || s.endsWith(".DSA") || s.endsWith(".RSA") || s.endsWith(".EC");
+            })
+            .forEach(sneak(Files::delete));
+        }
+        return invalid;
+    }
 }
