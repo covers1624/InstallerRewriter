@@ -350,14 +350,14 @@ public class InstallerRewriter {
 
         if (inPlace) {
             //Move windows installers if found
-            MavenNotation winNotation = installer.withClassifier("installer-win").withClassifier("exe");
+            MavenNotation winNotation = installer.withClassifier("installer-win").withExtension("exe");
             Path winFile = winNotation.toPath(repo);
             if (Files.exists(winFile)) {
                 moveWithAssociated(winFile, winNotation.toPath(backupPath));
             }
 
             //Move javadoc zips.. Its 10 GB of useless space.
-            MavenNotation docNotation = installer.withClassifier("javadoc").withClassifier("zip");
+            MavenNotation docNotation = installer.withClassifier("javadoc").withExtension("zip");
             Path docFile = docNotation.toPath(repo);
             if (Files.exists(docFile)) {
                 moveWithAssociated(docFile, docNotation.toPath(backupPath));
