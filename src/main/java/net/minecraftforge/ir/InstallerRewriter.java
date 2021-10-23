@@ -433,6 +433,7 @@ public class InstallerRewriter {
     }
 
     public static void moveWithAssociated(Path from, Path to) throws IOException {
+        Utils.makeParents(to);
         Files.move(from, to);
         String theFileName = from.getFileName().toString();
         List<Path> associated = Files.list(from.getParent())
