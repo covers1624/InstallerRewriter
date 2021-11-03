@@ -264,9 +264,10 @@ class JarContents {
             os.flush();
             this.write(MANIFEST, os.toByteArray());
 
-            this.data.keySet().stream()
+            List<String> files = this.data.keySet().stream()
             .filter(JarContents::isSignature)
-            .forEach(this::delete);
+            .collect(Collectors.toList());
+            files.forEach(this::delete);
         }
     }
 

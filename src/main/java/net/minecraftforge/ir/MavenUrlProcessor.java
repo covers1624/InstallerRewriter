@@ -156,8 +156,10 @@ public class MavenUrlProcessor implements InstallerProcessor {
         } else if ("org.ow2.asm:asm:4.1-all".equals(name)) {
             lib.addProperty("name", "org.ow2.asm:asm-all:4.1");
             changed = true;
+        } else if (name.startsWith("org.scala-lang.plugins:scala-continuations-") && lib.has("checksums")) {
+            lib.remove("checksums");
+            changed = true;
         }
-
 
         changed |= rewriteUrl(notation, lib);
         if (lib.has("downloads")) {
