@@ -30,14 +30,8 @@ import net.covers1624.quack.maven.MavenNotation;
 import net.covers1624.quack.util.JavaPathUtils;
 import net.covers1624.quack.util.MultiHasher;
 import net.covers1624.quack.util.SneakyUtils;
-import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
-import okhttp3.ResponseBody;
-import okio.BufferedSink;
-import okio.Okio;
-import okio.Source;
-import org.apache.commons.lang3.tuple.Pair;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.maven.artifact.versioning.ComparableVersion;
@@ -50,24 +44,19 @@ import java.net.URISyntaxException;
 import java.net.URL;
 import java.nio.file.*;
 import java.nio.file.attribute.FileTime;
-import java.time.Duration;
 import java.util.*;
 import java.util.stream.Collectors;
 
 import static java.util.Arrays.asList;
 import static net.covers1624.quack.util.SneakyUtils.sneaky;
-import static net.minecraftforge.ir.Utils.makeParents;
 import static net.minecraftforge.ir.Utils.runWaitFor;
 
 /**
  * Created by covers1624 on 30/4/21.
  */
-@SuppressWarnings ("UnstableApiUsage")
 public class InstallerRewriter {
 
     public static final Logger LOGGER = LogManager.getLogger();
-
-    public static final String USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 Safari/537.36";
 
     public static final URL VERSION_MANIFEST = sneaky(() -> new URL("https://launchermeta.mojang.com/mc/game/version_manifest.json"));
 
@@ -104,10 +93,6 @@ public class InstallerRewriter {
 
     public static final Path RUN_DIR = Paths.get(".").toAbsolutePath().normalize();
     public static final Path CACHE_DIR = RUN_DIR.resolve("cache");
-    public static final OkHttpClient HTTP_CLIENT = new OkHttpClient.Builder()
-            .readTimeout(Duration.ofMinutes(5))
-            .connectTimeout(Duration.ofMinutes(5))
-            .build();
 
     private static final Map<InstallerFormat, InstallerProcessor> PROCESSORS = ImmutableMap.of(
             InstallerFormat.V1, new InstallerV1Processor(),
@@ -122,7 +107,6 @@ public class InstallerRewriter {
     );
 
     //Speeeeeeed.
-    private static final Set<String> recentFiles = new HashSet<>();
     private static final Map<String, Boolean> recentHeadRequests = new HashMap<>();
 
     public static void main(String[] args) throws Throwable {
@@ -131,15 +115,10 @@ public class InstallerRewriter {
 
     public static int mainI(String[] args) throws Throwable {
         OptionParser parser = new OptionParser();
-        OptionSpec<String> nonOptions = parser.nonOptions();
 
         OptionSpec<Void> helpOpt = parser.acceptsAll(asList("h", "help"), "Prints this help.").forHelp();
 
         OptionSpec<Void> validateMetadataOpt = parser.acceptsAll(asList("validate"), "Validates all versions exist in maven-metadata.xml");
-
-        OptionSpec<String> installerCoordsOpt = parser.acceptsAll(asList("installer"), "The maven coords of the installer to use. group:module:version[:classifier][@ext]")
-                .withRequiredArg()
-                .defaultsTo("net.minecraftforge:installer:2.0.+:shrunk");
 
         OptionSpec<Void> inPlaceOpt = parser.acceptsAll(asList("i", "in-place"), "Specifies if we should update the repository in-place, moving old installers to the specified backups dir, or if we should use an output folder.");
 
@@ -156,9 +135,6 @@ public class InstallerRewriter {
                 .requiredUnless(inPlaceOpt)
                 .withRequiredArg()
                 .withValuesConvertedBy(new PathConverter());
-
-
-        OptionSpec<Void> urlFixesOpt =  parser.acceptsAll(asList("u", "url-only"), "Will only run the maven URL updating processor.");
 
         //Signing
         OptionSpec<Void> signOpt = parser.acceptsAll(asList("sign"), "If jars should be signed or not.");
@@ -182,6 +158,11 @@ public class InstallerRewriter {
                 .availableIf(signOpt)
                 .requiredIf(signOpt)
                 .withRequiredArg();
+
+        // Processors to run:
+        OptionSpec<Void> mavenUrlChangeOpt  = parser.acceptsAll(asList("maven-url"), "Updates " + OLD_FORGE_MAVEN + " to " + FORGE_MAVEN);
+        OptionSpec<Void> updateInstallerOpt = parser.acceptsAll(asList("update-installer"), "Updates the installer's executible code to the latest version for the major version used."); // Stupid name...
+        OptionSpec<Void> convert1To2Opt     = parser.acceptsAll(asList("convert-legacy"), "Attempts to convert the legacy 1.x installer data to 2.x compatible version");
 
         OptionSet optSet = parser.parse(args);
         if (optSet.has(helpOpt)) {
@@ -233,13 +214,18 @@ public class InstallerRewriter {
             signProps.keyPass = optSet.valueOf(keyPassOpt);
         }
 
-        boolean urlFixesOnly = optSet.has(urlFixesOpt);
-
-        LOGGER.info("Resolving latest Forge installer..");
-        MavenNotation installerNotation = MavenNotation.parse(optSet.valueOf(installerCoordsOpt));
-        MavenNotation latestInstaller = resolveLatestInstaller(installerNotation);
-        Path latestInstallerPath = CACHE_DIR.resolve(latestInstaller.toPath());
-        downloadFile(latestInstaller.toURL(FORGE_MAVEN), latestInstallerPath);
+        boolean mavenUrlChange = optSet.has(mavenUrlChangeOpt);
+        boolean convert1To2 = optSet.has(convert1To2Opt);
+        if (convert1To2) {
+            throw new IllegalStateException("Converting from 1.x to 2.x not implemented currently");
+        }
+        InstallerUpdater instUpdater = null;
+        if (optSet.has(updateInstallerOpt)) {
+            instUpdater = new InstallerUpdater();
+            if (!instUpdater.loadInstallerData(CACHE_DIR)) {
+                return -1;
+            }
+        }
 
         MavenNotation forgeNotation = MavenNotation.parse("net.minecraftforge:forge");
 
@@ -292,15 +278,20 @@ public class InstallerRewriter {
         folderVersions.sort(Comparator.comparing(ComparableVersion::new));
         LOGGER.info("Processing versions..");
         for (int x = 0; x < folderVersions.size(); x++) {
-            processVersion(signProps, forgeNotation.withVersion(folderVersions.get(x)), repoPath, backupPath, outputPath, latestInstallerPath, urlFixesOnly, x, folderVersions.size());
+            processVersion(signProps, forgeNotation.withVersion(folderVersions.get(x)),
+                repoPath, backupPath, outputPath,
+                instUpdater, mavenUrlChange, convert1To2,
+                x, folderVersions.size());
         }
 
         return 0;
     }
 
-    private static void processVersion(SignProps signProps, MavenNotation notation, Path repo, @Nullable Path backupPath, @Nullable Path outputPath, Path latestInstaller, boolean urlFixesOnly, int idx, int total) throws IOException {
-        if (notation.version.startsWith("1.5.2-")) return; //TODO Temporary
-
+    private static void processVersion(SignProps signProps, MavenNotation notation, Path repo,
+        @Nullable Path backupPath, @Nullable Path outputPath,
+        InstallerUpdater instUpdater, boolean mavenUrlFix, boolean convert1To2,
+        int idx, int total
+    ) throws IOException {
         boolean inPlace = backupPath != null;
 
         MavenNotation installer = notation.withClassifier("installer");
@@ -313,40 +304,15 @@ public class InstallerRewriter {
         LOGGER.info("");
         LOGGER.info("[{}/{}] Found installer jar for: {}", idx, total, notation);
 
-        //Attempt to detect the installer format.
-        InstallerFormat probableFormat;
-        try (FileSystem fs = IOUtils.getJarFileSystem(repoInstallerPath, true)) {
-            Path jarRoot = fs.getPath("/");
-            probableFormat = InstallerFormat.detectInstallerFormat(jarRoot);
-            if (probableFormat == null) {
-                LOGGER.error("Unable to detect probable installer format for {}", notation);
-                return;
-            }
-        }
-        LOGGER.info("[{}/{}] Found probable format: {}", idx, total, probableFormat);
+        JarContents contents = JarContents.loadJar(repoInstallerPath.toFile());
 
-        //List if files that need to be re hashed/signed
-        List<Pair<Path, Path>> modifiedFiles = new ArrayList<>();
-        ProcessorContext ctx = new ProcessorContext(notation, installer, repo) {
-            @Override
-            public Pair<Path, Path> getFile(MavenNotation notation) throws IOException {
-                Path repoFile = notation.toPath(repo);
-                Pair<Path, Path> pair;
-                if (inPlace) {
-                    Path backupFile = notation.toPath(backupPath);
-                    moveWithAssociated(repoFile, backupFile);
-                    pair = Pair.of(backupFile, repoFile);
-                } else {
-                    Path outFile = notation.toPath(outputPath);
-                    pair = Pair.of(repoFile, outFile);
-                }
-                modifiedFiles.add(pair);
-                if (notation.equals(installer)) {
-                    Files.copy(latestInstaller, makeParents(pair.getRight()), StandardCopyOption.REPLACE_EXISTING);
-                }
-                return pair;
-            }
-        };
+        //Attempt to detect the installer format.
+        InstallerFormat format = InstallerFormat.detectInstallerFormat(contents);
+        if (format == null) {
+            LOGGER.error("Unable to detect installer format for {}", notation);
+            return;
+        }
+        LOGGER.info("[{}/{}] Found probable format: {}", idx, total, format);
 
         if (inPlace) {
             //Move windows installers if found
@@ -366,70 +332,46 @@ public class InstallerRewriter {
 
         LOGGER.info("[{}/{}] Processing {}..", idx, total, notation);
 
-        InstallerProcessor processor = null;
-        if (urlFixesOnly)
-            processor = new MavenUrlProcessor();
-        else
-            processor = PROCESSORS.get(probableFormat);
+        if (instUpdater != null)
+            format = instUpdater.pre(installer, contents, format);
+        if (mavenUrlFix)
+            format = new MavenUrlProcessor().process(installer, contents, format);
+        if (convert1To2)
+            format = PROCESSORS.get(format).process(installer, contents, format);
+        if (instUpdater != null)
+            format = instUpdater.post(installer, contents, format);
 
-        boolean changed = processor.process(ctx);
-        LOGGER.info("[{}/{}] Processing finished!", idx, total);
-
-        for (Pair<Path, Path> file : modifiedFiles) {
-            Path original = file.getLeft();
-            Path modified = file.getRight();
-            if (!changed) {
-                Files.delete(modified);
-                if (inPlace) {
-                    moveWithAssociated(original, modified); // Move the old file back
-                } else {
-                    Files.delete(modified.getParent()); // Delete parent directory if empty
-                }
+        if (contents.changed()) {
+            LOGGER.info("[{}/{}] Contents Changed, saving file", idx, total);
+            FileTime timestamp = Files.getLastModifiedTime(repoInstallerPath);
+            Path output = null;
+            if (inPlace) {
+                output = installer.toPath(repo);
+                Path backupFile = installer.toPath(backupPath);
+                moveWithAssociated(repoInstallerPath, backupFile);
             } else {
-                //Re-sign all modified files.
-                if (signProps != null) {
-                    signJar(signProps, modified);
-                }
+                output = installer.toPath(outputPath);
+            }
+            contents.save(output.toFile());
+            Files.setLastModifiedTime(output, timestamp);
 
-                MultiHasher hasher = new MultiHasher(HASH_FUNCS);
-                hasher.load(modified);
-                MultiHasher.HashResult result = hasher.finish();
-                for (Map.Entry<MultiHasher.HashFunc, HashCode> entry : result.entrySet()) {
-                    Path hashFile = modified.resolveSibling(modified.getFileName() + "." + entry.getKey().name.toLowerCase());
-                    try (PrintWriter out = new PrintWriter(Files.newBufferedWriter(hashFile))) {
-                        out.print(entry.getValue().toString());
-                        out.flush();
-                    }
+            if (signProps != null) {
+                signJar(signProps, output);
+            }
+
+            MultiHasher hasher = new MultiHasher(HASH_FUNCS);
+            hasher.load(output);
+            MultiHasher.HashResult result = hasher.finish();
+            for (Map.Entry<MultiHasher.HashFunc, HashCode> entry : result.entrySet()) {
+                Path hashFile = output.resolveSibling(output.getFileName() + "." + entry.getKey().name.toLowerCase());
+                try (PrintWriter out = new PrintWriter(Files.newBufferedWriter(hashFile))) {
+                    out.print(entry.getValue().toString());
+                    out.flush();
                 }
+                Files.setLastModifiedTime(hashFile, timestamp);
             }
         }
-    }
-
-    public static MavenNotation resolveLatestInstaller(MavenNotation installerNotation) throws IOException {
-        String metadataPath = installerNotation.toModulePath() + "maven-metadata.xml";
-        Path metadataFile = CACHE_DIR.resolve(metadataPath);
-        downloadFile(new URL(FORGE_MAVEN + metadataPath), metadataFile, true);
-
-        List<String> versions = Utils.parseVersions(metadataFile);
-        String targetVersion = installerNotation.version;
-        MavenNotation ret;
-        if (targetVersion.endsWith("+")) {
-            String tv = targetVersion.replace("+", "");
-            List<String> filtered = versions.stream()
-                    .filter(e -> e.startsWith(tv))
-                    .sorted(Comparator.comparing(ComparableVersion::new).reversed())
-                    .collect(Collectors.toList());
-            if (filtered.isEmpty()) {
-                throw new RuntimeException("Could not find any installer versions matching: " + targetVersion);
-            }
-            ret = installerNotation.withVersion(filtered.get(0));
-        } else {
-            if (!versions.contains(targetVersion)) throw new RuntimeException("Exact installer version '" + targetVersion + "' does not exist.");
-
-            ret = installerNotation;
-        }
-        LOGGER.info("Resolved Forge installer: {}", ret);
-        return ret;
+        LOGGER.info("[{}/{}] Processing finished!", idx, total);
     }
 
     public static void moveWithAssociated(Path from, Path to) throws IOException {
@@ -460,55 +402,6 @@ public class InstallerRewriter {
         });
     }
 
-    public static void downloadFile(URL url, Path file) throws IOException {
-        downloadFile(url, file, false);
-    }
-
-    public static void downloadFile(URL url, Path file, boolean forceDownload) throws IOException {
-        // OkHttp does not handle the file protocol.
-        if (url.getProtocol().equals("file")) {
-            try {
-                Files.createDirectories(file.getParent());
-                Files.copy(Paths.get(url.toURI()), file, StandardCopyOption.REPLACE_EXISTING);
-            } catch (URISyntaxException e) {
-                throw new RuntimeException("What.", e);
-            }
-        }
-        Path tmp = file.resolveSibling(file.getFileName() + "__tmp");
-        if (forceDownload && !recentFiles.contains(url.toString())) {
-            Files.deleteIfExists(file);
-        }
-        if (Files.exists(file)) return; //Assume the file is already downloaded.
-        recentFiles.add(url.toString());
-
-        Request request = new Request.Builder()
-                .url(url)
-                .header("User-Agent", USER_AGENT)
-                .build();
-        try (Response response = HTTP_CLIENT.newCall(request).execute()) {
-            ResponseBody body = response.body();
-            if (!response.isSuccessful()) {
-                throw new RuntimeException("Got: " + response.code());
-            }
-            if (body == null) {
-                throw new RuntimeException("Expected response body.");
-            }
-
-            LOGGER.info("Downloading file " + file.getFileName());
-            try (Source source = body.source()) {
-                try (BufferedSink sink = Okio.buffer(Okio.sink(makeParents(tmp)))) {
-                    sink.writeAll(source);
-                }
-            }
-            Files.move(tmp, file);
-
-            Date lastModified = response.headers().getDate("Last-Modified");
-            if (lastModified != null) {
-                Files.setLastModifiedTime(file, FileTime.fromMillis(lastModified.getTime()));
-            }
-        }
-    }
-
     public static boolean headRequest(URL url) throws IOException {
         // OkHttp does not handle the file protocol.
         if (url.getProtocol().equals("file")) {
@@ -526,9 +419,9 @@ public class InstallerRewriter {
         Request request = new Request.Builder()
                 .url(url)
                 .head()
-                .header("User-Agent", USER_AGENT)
+                .header("User-Agent", Utils.USER_AGENT)
                 .build();
-        try (Response response = HTTP_CLIENT.newCall(request).execute()) {
+        try (Response response = Utils.HTTP_CLIENT.newCall(request).execute()) {
             recent = response.isSuccessful();
             recentHeadRequests.put(url.toString(), recent);
             return recent;

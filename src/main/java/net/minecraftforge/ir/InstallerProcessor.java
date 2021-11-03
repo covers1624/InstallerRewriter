@@ -20,6 +20,8 @@ package net.minecraftforge.ir;
 
 import java.io.IOException;
 
+import net.covers1624.quack.maven.MavenNotation;
+
 /**
  * Created by covers1624 on 1/5/21.
  */
@@ -30,5 +32,5 @@ public interface InstallerProcessor {
      *
      * @param ctx The context.
      */
-    boolean process(ProcessorContext ctx) throws IOException;
+    InstallerFormat process(MavenNotation installer, JarContents content, InstallerFormat format) throws IOException;
 }

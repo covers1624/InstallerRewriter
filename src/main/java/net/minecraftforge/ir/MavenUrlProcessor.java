@@ -18,7 +18,6 @@
  */
 package net.minecraftforge.ir;
 
-import static net.covers1624.quack.util.SneakyUtils.sneak;
 import static net.minecraftforge.ir.InstallerRewriter.FORGE_MAVEN;
 import static net.minecraftforge.ir.InstallerRewriter.MIRROR_LIST;
 import static net.minecraftforge.ir.InstallerRewriter.OLD_FORGE_MAVEN;
@@ -26,90 +25,51 @@ import static net.minecraftforge.ir.Utils.getAsInt;
 import static net.minecraftforge.ir.Utils.getAsString;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.io.OutputStream;
 import java.io.Reader;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.FileSystem;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
-import java.nio.file.attribute.FileTime;
-import java.util.Base64;
-import java.util.Iterator;
-import java.util.Map.Entry;
-import java.util.jar.Attributes;
-import java.util.jar.Manifest;
-import java.util.stream.Collectors;
-
-import org.apache.commons.lang3.tuple.Pair;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import com.google.common.hash.HashCode;
-import com.google.common.hash.HashFunction;
-import com.google.common.hash.Hashing;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 
-import net.covers1624.quack.io.CopyingFileVisitor;
-import net.covers1624.quack.io.IOUtils;
 import net.covers1624.quack.maven.MavenNotation;
-import net.covers1624.quack.util.HashUtils;
 
 public class MavenUrlProcessor implements InstallerProcessor {
     private static final Logger LOGGER = LogManager.getLogger();
     private static final String MIRROR_BRAND = "https://files.minecraftforge.net/mirror-brand.list";
+    private static final String INSTALL_PROFILE = "install_profile.json";
 
     @Override
-    public boolean process(ProcessorContext ctx) throws IOException {
-        Pair<Path, Path> pathPair = ctx.getFile(ctx.installer);
-        try (FileSystem oldFs = IOUtils.getJarFileSystem(pathPair.getLeft(), true);
-             FileSystem newFs = IOUtils.getJarFileSystem(pathPair.getRight(), true)
-        ) {
-            Path oldJarRoot = oldFs.getPath("/");
-            Path newJarRoot = newFs.getPath("/");
-
-            Files.walkFileTree(oldJarRoot, new CopyingFileVisitor(oldJarRoot, newJarRoot, e -> true));
-
-            boolean changed = rewriteInstallProfile(ctx.notation, oldJarRoot, newJarRoot);
-            changed |= validateSignatures(newJarRoot);
-            Files.setLastModifiedTime(pathPair.getRight(), Files.getLastModifiedTime(pathPair.getLeft()));
-            return changed;
+    public InstallerFormat process(MavenNotation notation, JarContents content, InstallerFormat format) throws IOException {
+        if (!content.contains(INSTALL_PROFILE)) {
+            LOGGER.error("Missing {} in {}", INSTALL_PROFILE, notation);
+            return format;
         }
-    }
-
-    // We don't use the object representation of these jsons as we don't want to accidentally nuke data from them.
-    private boolean rewriteInstallProfile(MavenNotation notation, Path oldJarRoot, Path newJarRoot) throws IOException {
-        Path profileJson = newJarRoot.resolve("install_profile.json");
-        if (!Files.exists(profileJson)) {
-            LOGGER.error("Missing install_profile.json {}", notation);
-            return false;
-        }
-
-        FileTime modified = Files.getLastModifiedTime(profileJson);
 
         JsonObject install;
-        try (Reader reader = new InputStreamReader(Files.newInputStream(profileJson))) {
+        try (Reader reader = new InputStreamReader(content.getInput(INSTALL_PROFILE))) {
             install = Utils.GSON.fromJson(reader, JsonObject.class);
         }
 
         boolean changed = false;
-        if (!install.has("spec"))
-            changed = rewriteInstallProfileV1(notation, install);
-        else
-            changed = rewriteInstallProfileV2(notation, install, newJarRoot);
+        switch (format) {
+            case V1:
+                changed = rewriteInstallProfileV1(notation, install);
+                break;
+            case V2:
+                changed = rewriteInstallProfileV2(notation, install, content);
+                break;
+        }
 
-        if (!changed)
-            return false;
+        if (changed) {
+            byte[] bytes = Utils.GSON.toJson(install).getBytes(StandardCharsets.UTF_8);
+            LOGGER.debug("Updating {} for {}", INSTALL_PROFILE, notation);
+            content.write(INSTALL_PROFILE, bytes);
+        }
 
-        byte[] bytes = Utils.GSON.toJson(install).getBytes(StandardCharsets.UTF_8);
-        LOGGER.debug("Updating install_profile.json for {}", notation);
-        Files.delete(profileJson);
-        Files.write(profileJson, bytes);
-        Files.setLastModifiedTime(profileJson, modified);
-        return true;
+        return format;
     }
 
     private boolean rewriteInstallProfileV1(MavenNotation notation, JsonObject profile) {
@@ -135,30 +95,24 @@ public class MavenUrlProcessor implements InstallerProcessor {
         return changed;
     }
 
-    private boolean rewriteInstallProfileV2(MavenNotation notation, JsonObject install, Path jarRoot) throws IOException {
+    private boolean rewriteInstallProfileV2(MavenNotation notation, JsonObject install, JarContents jar) throws IOException {
         if (getAsInt(install, "spec") != 0)
             return false;
         boolean changed = false;
 
         // Rewrite the 'json'.
         String json = getAsString(install, "json");
-        Path versionJson = jarRoot.resolve(json);
-        if (!Files.exists(versionJson)) {
+        if (!jar.contains(json))
             throw new RuntimeException("Missing version json: " + json);
-        }
 
         JsonObject version;
-        try (Reader reader = new InputStreamReader(Files.newInputStream(versionJson))) {
+        try (Reader reader = new InputStreamReader(jar.getInput(json))) {
             version = Utils.GSON.fromJson(reader, JsonObject.class);
         }
 
         if (rewriteVersionJson(notation, version)) {
             LOGGER.debug("Updating json {}.", json);
-            FileTime modified = Files.getLastModifiedTime(versionJson);
-            Files.delete(versionJson);
-            Files.write(versionJson, Utils.GSON.toJson(version).getBytes(StandardCharsets.UTF_8));
-            Files.setLastModifiedTime(versionJson, modified);
-            changed = true;
+            jar.write(json, Utils.GSON.toJson(version).getBytes(StandardCharsets.UTF_8));
         }
 
         // Ensure Mirror List exists and is updated.
@@ -194,6 +148,17 @@ public class MavenUrlProcessor implements InstallerProcessor {
 
     public static boolean rewriteLibrary(MavenNotation notation, JsonObject lib) {
         boolean changed = false;
+
+        String name = getAsString(lib, "name");
+        if ("net.minecraftforge_temp.legacy:legacyfixer:1.0".equals(name)) {
+            lib.addProperty("name", "net.minecraftforge:legacyfixer:1.0");
+            changed = true;
+        } else if ("org.ow2.asm:asm:4.1-all".equals(name)) {
+            lib.addProperty("name", "org.ow2.asm:asm-all:4.1");
+            changed = true;
+        }
+
+
         changed |= rewriteUrl(notation, lib);
         if (lib.has("downloads")) {
             JsonObject downloads = lib.getAsJsonObject("downloads");
@@ -234,76 +199,5 @@ public class MavenUrlProcessor implements InstallerProcessor {
         }
 
         return false;
-    }
-
-    private static boolean validateSignatures(Path root) throws IOException {
-        boolean invalid = false;
-        Path manifest = root.resolve("META-INF/MANIFEST.MF");
-        if (!Files.exists(manifest))
-            return false;
-
-        Manifest mf = null;
-        try (InputStream is = Files.newInputStream(manifest)) {
-            mf = new Manifest(is);
-        }
-
-        for (Entry<String, Attributes> entry : mf.getEntries().entrySet()) {
-            String name = entry.getKey().toString();
-            Path target = root.resolve(name);
-
-            for (String key : entry.getValue().keySet().stream().map(Object::toString).collect(Collectors.toList())) {
-                if (key.endsWith("-Digest")) {
-                    if (!Files.exists(target) || !Files.isRegularFile(target)) // Hashes can exist in the manifest even if the files dont exist.
-                        continue;
-
-                    HashFunction func = null;
-                    switch (key.substring(0, key.length() - "-Digest".length())) {
-                        case "SHA-256": func = Hashing.sha256(); break; // Only one i've seen, but might as well support he others.
-                        case "SHA-1":   func = Hashing.sha1();   break;
-                        case "SHA-512": func = Hashing.sha512(); break;
-                        case "MD5":     func = Hashing.md5();    break;
-                        default: throw new IOException("Unknown manifest signature format: " + key);
-                    }
-                    String actual = HashUtils.hash(func, target).toString();
-                    String expected = HashCode.fromBytes(Base64.getDecoder().decode(entry.getValue().getValue(key))).toString();
-                    if (!expected.equals(actual)) {
-                        LOGGER.info("Installer manifest hash mismatch, stripping signatures");
-                        invalid = true;
-                        break;
-                    }
-                }
-            }
-
-            if (invalid)
-                break;
-        }
-
-        if (invalid) {
-            // cleanup manifest
-            Iterator<Entry<String, Attributes>> itr = mf.getEntries().entrySet().iterator();
-            while (itr.hasNext()) {
-                Entry<String, Attributes> entry = itr.next();
-                Attributes attrs = entry.getValue();
-                attrs.keySet().removeIf(e -> e.toString().endsWith("-Digest"));
-                if (attrs.isEmpty())
-                    itr.remove();
-            }
-            FileTime modified = Files.getLastModifiedTime(manifest);
-            try (OutputStream os = Files.newOutputStream(manifest, StandardOpenOption.TRUNCATE_EXISTING)) {
-                mf.write(os);
-                os.flush();
-            }
-            Files.setLastModifiedTime(manifest, modified);
-
-            Files.list(root.resolve("META-INF"))
-            .filter(Files::isRegularFile)
-            .filter(e -> {
-                // Find all signing metadata files.
-                String s = e.getFileName().toString();
-                return s.endsWith(".SF") || s.endsWith(".DSA") || s.endsWith(".RSA") || s.endsWith(".EC");
-            })
-            .forEach(sneak(Files::delete));
-        }
-        return invalid;
     }
 }

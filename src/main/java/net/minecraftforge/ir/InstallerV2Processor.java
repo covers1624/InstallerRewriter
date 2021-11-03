@@ -62,7 +62,9 @@ public class InstallerV2Processor implements InstallerProcessor {
     private static final Pattern PATTERN = Pattern.compile("^/META-INF/.*$|/.*.class$");
 
     @Override
-    public boolean process(ProcessorContext ctx) throws IOException {
+    public InstallerFormat process(MavenNotation installer, JarContents content, InstallerFormat format) throws IOException {
+        return format;
+        /*
         Pair<Path, Path> pathPair = ctx.getFile(ctx.installer);
         try (FileSystem oldFs = IOUtils.getJarFileSystem(pathPair.getLeft(), true);
              FileSystem newFs = IOUtils.getJarFileSystem(pathPair.getRight(), true)
@@ -87,6 +89,7 @@ public class InstallerV2Processor implements InstallerProcessor {
             }
             return false;
         }
+        */
     }
 
     // We don't use the object representation of these jsons as we don't want to accidentally nuke data from them.
@@ -189,7 +192,7 @@ public class InstallerV2Processor implements InstallerProcessor {
         } else {
             // Download the artifact if necessary
             artifactPath = InstallerRewriter.CACHE_DIR.resolve(path);
-            InstallerRewriter.downloadFile(new URL(url), artifactPath);
+            Utils.downloadFile(new URL(url), artifactPath);
         }
 
         // Compute sha1 and length of the artifact.

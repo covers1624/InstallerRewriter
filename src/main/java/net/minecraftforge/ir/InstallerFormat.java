@@ -18,8 +18,13 @@
  */
 package net.minecraftforge.ir;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.util.Map;
+
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 /**
  * Created by covers1624 on 30/4/21.
@@ -28,14 +33,20 @@ public enum InstallerFormat {
     V2,
     V1,
     ;
+    private static final Logger LOGGER = LogManager.getLogger();
 
-    public static InstallerFormat detectInstallerFormat(Path jarRoot) {
-        if (Files.exists(jarRoot.resolve("install_profile.json"))) {
-            if (Files.exists(jarRoot.resolve("version.json"))) {
-                return V2;
-            }
-            return V1;
+    public static InstallerFormat detectInstallerFormat(JarContents jar) {
+        try (InputStream is = jar.getInput("install_profile.json")) {
+            if (is == null)
+                return null;
+
+            @SuppressWarnings("unchecked")
+            Map<String, ?> map = Utils.GSON.fromJson(new InputStreamReader(is), Map.class);
+
+            return map.containsKey("install") && map.containsKey("versionInfo") ? V1 : V2;
+        } catch (IOException e) {
+            LOGGER.error("Failed to parse install_profile.json", e);
+            return null;
         }
-        return null;
     }
 }

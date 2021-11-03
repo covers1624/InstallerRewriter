@@ -31,6 +31,14 @@ import net.covers1624.quack.util.HashUtils;
 import net.covers1624.quack.util.ProcessUtils;
 import net.minecraftforge.ir.ClasspathEntry.LibraryClasspathEntry;
 import net.minecraftforge.ir.ClasspathEntry.StringClasspathEntry;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
+import okhttp3.ResponseBody;
+import okio.BufferedSink;
+import okio.Okio;
+import okio.Source;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.maven.artifact.repository.metadata.Metadata;
@@ -39,15 +47,25 @@ import org.apache.maven.artifact.repository.metadata.io.xpp3.MetadataXpp3Reader;
 import org.codehaus.plexus.util.xml.pull.XmlPullParserException;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.net.URISyntaxException;
+import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.FileTime;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.Date;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
@@ -68,9 +86,17 @@ public class Utils {
     private static final MetadataXpp3Reader METADATA_XPP3_READER = new MetadataXpp3Reader();
     private static final HashFunction SHA256 = Hashing.sha256();
 
+    public static final String USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 Safari/537.36";
+
+    public static final OkHttpClient HTTP_CLIENT = new OkHttpClient.Builder()
+            .readTimeout(Duration.ofMinutes(5))
+            .connectTimeout(Duration.ofMinutes(5))
+            .build();
+
     public static final Gson GSON = new GsonBuilder()
             .registerTypeAdapter(MavenNotation.class, new MavenNotationAdapter())
             .setPrettyPrinting()
+            .disableHtmlEscaping()
             .create();
 
     public static int getAsInt(JsonObject obj, String key) {
@@ -220,5 +246,64 @@ public class Utils {
                 }
             }
         }));
+    }
+
+    public static void downloadFile(URL url, Path file) throws IOException {
+        downloadFile(url, file, false);
+    }
+
+    private static final Set<String> recentFiles = new HashSet<>();
+    public static void downloadFile(URL url, Path file, boolean forceDownload) throws IOException {
+        // OkHttp does not handle the file protocol.
+        if (url.getProtocol().equals("file")) {
+            try {
+                Files.createDirectories(file.getParent());
+                Files.copy(Paths.get(url.toURI()), file, StandardCopyOption.REPLACE_EXISTING);
+            } catch (URISyntaxException e) {
+                throw new RuntimeException("What.", e);
+            }
+        }
+        Path tmp = file.resolveSibling(file.getFileName() + "__tmp");
+        if (forceDownload && !recentFiles.contains(url.toString())) {
+            Files.deleteIfExists(file);
+        }
+        if (Files.exists(file)) return; //Assume the file is already downloaded.
+        recentFiles.add(url.toString());
+
+        Request request = new Request.Builder()
+                .url(url)
+                .header("User-Agent", USER_AGENT)
+                .build();
+        try (Response response = HTTP_CLIENT.newCall(request).execute()) {
+            ResponseBody body = response.body();
+            if (!response.isSuccessful()) {
+                throw new RuntimeException("Got: " + response.code());
+            }
+            if (body == null) {
+                throw new RuntimeException("Expected response body.");
+            }
+
+            LOGGER.info("Downloading file " + file.getFileName());
+            try (Source source = body.source()) {
+                try (BufferedSink sink = Okio.buffer(Okio.sink(makeParents(tmp)))) {
+                    sink.writeAll(source);
+                }
+            }
+            Files.move(tmp, file);
+
+            Date lastModified = response.headers().getDate("Last-Modified");
+            if (lastModified != null) {
+                Files.setLastModifiedTime(file, FileTime.fromMillis(lastModified.getTime()));
+            }
+        }
+    }
+
+    public static byte[] toBytes(InputStream is) throws IOException {
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        byte[] buf = new byte[0x100];
+        int len;
+        while ((len = is.read(buf)) != -1)
+            bos.write(buf, 0, len);
+        return bos.toByteArray();
     }
 }

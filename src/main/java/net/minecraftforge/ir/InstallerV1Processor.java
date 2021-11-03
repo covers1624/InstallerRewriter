@@ -98,7 +98,9 @@ public class InstallerV1Processor implements InstallerProcessor {
             MavenNotation.parse("net.minecraftforge:legacyjavafixer:2.0.0");
 
     @Override
-    public boolean process(ProcessorContext ctx) throws IOException {
+    public InstallerFormat process(MavenNotation notation, JarContents content, InstallerFormat format) throws IOException {
+        return format;
+        /*
         boolean requiresLJF = requiresLJF(ctx.notation);
         MavenNotation baseNotation = ctx.notation.withClassifier(null).withExtension("jar");
         MavenNotation uniNotation = baseNotation.withClassifier("universal");
@@ -209,6 +211,7 @@ public class InstallerV1Processor implements InstallerProcessor {
 
             return true;
         }
+        */
     }
 
     private void copyTime(Path from, Path to) throws IOException {
@@ -216,7 +219,8 @@ public class InstallerV1Processor implements InstallerProcessor {
         Files.setLastModifiedTime(to, last);
     }
 
-    public static Install generateInstallProfile(ProcessorContext ctx, Path newFilePath) throws IOException {
+    /*
+    private static Install generateInstallProfile(ProcessorContext ctx, Path newFilePath) throws IOException {
         Install install = new Install();
         install._comment_ = comment;
         install.spec = 0;
@@ -240,6 +244,7 @@ public class InstallerV1Processor implements InstallerProcessor {
 
         return install;
     }
+    */
 
     public static Version generateVersionJson(boolean requiresLJF, Install newProfile, V1InstallProfile v1Profile, List<ClasspathEntry> classpathLibraries) throws IOException {
         V1InstallProfile.VersionInfo v1VersionInfo = v1Profile.versionInfo;
@@ -265,7 +270,7 @@ public class InstallerV1Processor implements InstallerProcessor {
         });
         if (v1VersionInfo.inheritsFrom == null) {
             Path versionManifest = CACHE_DIR.resolve("version_manifest.json");
-            downloadFile(VERSION_MANIFEST, versionManifest, true);
+            Utils.downloadFile(VERSION_MANIFEST, versionManifest, true);
 
             Manifest manifest;
             try (BufferedReader reader = Files.newBufferedReader(versionManifest)) {
@@ -274,7 +279,7 @@ public class InstallerV1Processor implements InstallerProcessor {
 
             String mcVersion = newProfile.minecraft;
             Path versionJson = CACHE_DIR.resolve(mcVersion + ".json");
-            downloadFile(new URL(manifest.getUrl(mcVersion)), versionJson, true);
+            Utils.downloadFile(new URL(manifest.getUrl(mcVersion)), versionJson, true);
 
             Version mcVersionJson;
             try (BufferedReader reader = Files.newBufferedReader(versionJson)) {
@@ -418,7 +423,7 @@ public class InstallerV1Processor implements InstallerProcessor {
         LOGGER.debug("Using {} repository for library {}", repo, name);
         Path libraryPath = name.toPath(CACHE_DIR);
         URL url = name.toURL(repo);
-        downloadFile(url, libraryPath);
+        Utils.downloadFile(url, libraryPath);
         libraryDownload.url = url.toString();
 
         HashCode hash = HashUtils.hash(SHA1, libraryPath);
@@ -502,7 +507,7 @@ public class InstallerV1Processor implements InstallerProcessor {
 
             // If we don't have it, Download it and use the cache dir.
             String maven = findFirstMaven(library, MAVENS);
-            downloadFile(library.name.toURL(maven), library.name.toPath(CACHE_DIR));
+            Utils.downloadFile(library.name.toURL(maven), library.name.toPath(CACHE_DIR));
             return cacheDir;
         }
 

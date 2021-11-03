@@ -22,7 +22,6 @@ import joptsimple.OptionParser;
 import joptsimple.OptionSet;
 import joptsimple.OptionSpec;
 import joptsimple.util.PathConverter;
-import net.covers1624.quack.io.IOUtils;
 import net.covers1624.quack.maven.MavenNotation;
 import net.covers1624.quack.util.JavaPathUtils;
 import net.covers1624.quack.util.ProcessUtils;
@@ -187,7 +186,7 @@ public class InstallerTester {
 
         {
             Path versionManifest = CACHE_DIR.resolve("version_manifest.json");
-            downloadFile(VERSION_MANIFEST, versionManifest, true);
+            Utils.downloadFile(VERSION_MANIFEST, versionManifest, true);
 
             Manifest manifest;
             try (BufferedReader reader = Files.newBufferedReader(versionManifest)) {
@@ -197,7 +196,7 @@ public class InstallerTester {
             String[] vSplit = notation.version.split("-", 2);
             String mcVersion = vSplit[0].replace("_", "-");
             Path versionJson = CACHE_DIR.resolve(mcVersion + ".json");
-            downloadFile(new URL(manifest.getUrl(mcVersion)), versionJson, true);
+            Utils.downloadFile(new URL(manifest.getUrl(mcVersion)), versionJson, true);
 
             Version mcVersionJson;
             try (BufferedReader reader = Files.newBufferedReader(versionJson)) {
@@ -207,7 +206,7 @@ public class InstallerTester {
             Version.Download server = mcVersionJson.downloads.get("server");
             String name = "minecraft_server." + mcVersion + ".jar";
             Path serverJar = CACHE_DIR.resolve(name);
-            downloadFile(new URL(server.url), serverJar);
+            Utils.downloadFile(new URL(server.url), serverJar);
             Files.copy(serverJar, installDirectory.resolve(name), StandardCopyOption.REPLACE_EXISTING);
         }
 
