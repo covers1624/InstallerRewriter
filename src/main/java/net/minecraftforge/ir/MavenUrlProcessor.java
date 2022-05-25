@@ -63,13 +63,21 @@ public class MavenUrlProcessor implements InstallerProcessor {
                 break;
         }
 
-        if (changed) {
-            byte[] bytes = Utils.GSON.toJson(install).getBytes(StandardCharsets.UTF_8);
-            LOGGER.debug("Updating {} for {}", INSTALL_PROFILE, notation);
-            content.write(INSTALL_PROFILE, bytes);
-        }
+        if (changed)
+            writeProfile(content, install, notation);
 
         return format;
+    }
+
+    protected void writeProfile(JarContents content, JsonObject install, MavenNotation notation) {
+        byte[] bytes = Utils.GSON.toJson(install).getBytes(StandardCharsets.UTF_8);
+        LOGGER.debug("Updating {} for {}", INSTALL_PROFILE, notation);
+        content.write(INSTALL_PROFILE, bytes);
+    }
+
+    protected void writeVersion(JarContents content, String name, JsonObject version) {
+        LOGGER.debug("Updating json {}.", name);
+        content.write(name, Utils.GSON.toJson(version).getBytes(StandardCharsets.UTF_8));
     }
 
     private boolean rewriteInstallProfileV1(MavenNotation notation, JsonObject profile) {
@@ -110,10 +118,8 @@ public class MavenUrlProcessor implements InstallerProcessor {
             version = Utils.GSON.fromJson(reader, JsonObject.class);
         }
 
-        if (rewriteVersionJson(notation, version)) {
-            LOGGER.debug("Updating json {}.", json);
-            jar.write(json, Utils.GSON.toJson(version).getBytes(StandardCharsets.UTF_8));
-        }
+        if (rewriteVersionJson(notation, version))
+            writeVersion(jar, json, version);
 
         // Ensure Mirror List exists and is updated.
         String mirrorList = getAsString(install, "mirrorList", null);
@@ -135,7 +141,7 @@ public class MavenUrlProcessor implements InstallerProcessor {
         return changed;
     }
 
-    public boolean rewriteVersionJson(MavenNotation notation, JsonObject version) {
+    private boolean rewriteVersionJson(MavenNotation notation, JsonObject version) {
         boolean changed = false;
 
         for (JsonElement library : version.getAsJsonArray("libraries")) {
@@ -146,7 +152,7 @@ public class MavenUrlProcessor implements InstallerProcessor {
         return changed;
     }
 
-    public static boolean rewriteLibrary(MavenNotation notation, JsonObject lib) {
+    private boolean rewriteLibrary(MavenNotation notation, JsonObject lib) {
         boolean changed = false;
 
         String name = getAsString(lib, "name");
@@ -177,7 +183,7 @@ public class MavenUrlProcessor implements InstallerProcessor {
         return changed;
     }
 
-    private static boolean rewriteUrl(MavenNotation notation, JsonObject json) {
+    protected boolean rewriteUrl(MavenNotation notation, JsonObject json) {
         if (!json.has("url"))
             return false;
 

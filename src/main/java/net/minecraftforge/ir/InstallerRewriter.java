@@ -159,6 +159,8 @@ public class InstallerRewriter {
                 .requiredIf(signOpt)
                 .withRequiredArg();
 
+        OptionSpec<Void> dryRunOpt = parser.acceptsAll(asList("dry"), "Runs everything without actually writing anything to disc.");
+
         // Processors to run:
         OptionSpec<Void> mavenUrlChangeOpt  = parser.acceptsAll(asList("maven-url"), "Updates " + OLD_FORGE_MAVEN + " to " + FORGE_MAVEN);
         OptionSpec<Void> updateInstallerOpt = parser.acceptsAll(asList("update-installer"), "Updates the installer's executible code to the latest version for the major version used."); // Stupid name...
@@ -170,6 +172,7 @@ public class InstallerRewriter {
             return -1;
         }
 
+        boolean dryRun = optSet.has(dryRunOpt);
         boolean inPlace = optSet.has(inPlaceOpt);
 
         if (!optSet.has(repoPathOpt)) {
@@ -178,13 +181,13 @@ public class InstallerRewriter {
             return -1;
         }
 
-        if (inPlace && !optSet.has(backupPathOpt)) {
+        if (inPlace && !optSet.has(backupPathOpt) && !dryRun) {
             LOGGER.error("Expected --backup argument.");
             parser.printHelpOn(System.err);
             return -1;
         }
 
-        if (!inPlace && !optSet.has(outputPathOpt)) {
+        if (!inPlace && !optSet.has(outputPathOpt) && !dryRun) {
             LOGGER.error("Expected --output argument.");
             return -1;
         }
@@ -220,7 +223,7 @@ public class InstallerRewriter {
             throw new IllegalStateException("Converting from 1.x to 2.x not implemented currently");
         }
         InstallerUpdater instUpdater = null;
-        if (optSet.has(updateInstallerOpt)) {
+        if (!dryRun && optSet.has(updateInstallerOpt)) {
             instUpdater = new InstallerUpdater();
             if (!instUpdater.loadInstallerData(CACHE_DIR)) {
                 return -1;
@@ -276,13 +279,17 @@ public class InstallerRewriter {
 
         LOGGER.info("Sorting version lists..");
         folderVersions.sort(Comparator.comparing(ComparableVersion::new));
+
         LOGGER.info("Processing versions..");
+        Set<String> deps = new TreeSet<>();
         for (int x = 0; x < folderVersions.size(); x++) {
             processVersion(signProps, forgeNotation.withVersion(folderVersions.get(x)),
                 repoPath, backupPath, outputPath,
                 instUpdater, mavenUrlChange, convert1To2,
-                x, folderVersions.size());
+                x, folderVersions.size(), dryRun, deps);
         }
+
+        deps.forEach(System.out::println);
 
         return 0;
     }
@@ -290,7 +297,7 @@ public class InstallerRewriter {
     private static void processVersion(SignProps signProps, MavenNotation notation, Path repo,
         @Nullable Path backupPath, @Nullable Path outputPath,
         InstallerUpdater instUpdater, boolean mavenUrlFix, boolean convert1To2,
-        int idx, int total
+        int idx, int total, boolean dryRun, Set<String> deps
     ) throws IOException {
         boolean inPlace = backupPath != null;
 
@@ -301,8 +308,7 @@ public class InstallerRewriter {
             LOGGER.warn("[{}/{}] Missing installer for: {}", idx, total, notation);
             return;
         }
-        LOGGER.info("");
-        LOGGER.info("[{}/{}] Found installer jar for: {}", idx, total, notation);
+        //LOGGER.info("");
 
         JarContents contents = JarContents.loadJar(repoInstallerPath.toFile());
 
@@ -312,9 +318,9 @@ public class InstallerRewriter {
             LOGGER.error("Unable to detect installer format for {}", notation);
             return;
         }
-        LOGGER.info("[{}/{}] Found probable format: {}", idx, total, format);
+        LOGGER.info("[{}/{}] Found {} installer jar for: {}", idx, total, format, notation);
 
-        if (inPlace) {
+        if (inPlace && !dryRun) {
             //Move windows installers if found
             MavenNotation winNotation = installer.withClassifier("installer-win").withExtension("exe");
             Path winFile = winNotation.toPath(repo);
@@ -330,7 +336,7 @@ public class InstallerRewriter {
             }
         }
 
-        LOGGER.info("[{}/{}] Processing {}..", idx, total, notation);
+        //LOGGER.info("[{}/{}] Processing {}..", idx, total, notation);
 
         if (instUpdater != null)
             format = instUpdater.pre(installer, contents, format);
@@ -340,8 +346,10 @@ public class InstallerRewriter {
             format = PROCESSORS.get(format).process(installer, contents, format);
         if (instUpdater != null)
             format = instUpdater.post(installer, contents, format);
+        if (deps != null)
+            new DependencyLister(deps).process(installer, contents, format);
 
-        if (contents.changed()) {
+        if (contents.changed() && !dryRun) {
             LOGGER.info("[{}/{}] Contents Changed, saving file", idx, total);
             FileTime timestamp = Files.getLastModifiedTime(repoInstallerPath);
             Path output = null;
@@ -371,7 +379,7 @@ public class InstallerRewriter {
                 Files.setLastModifiedTime(hashFile, timestamp);
             }
         }
-        LOGGER.info("[{}/{}] Processing finished!", idx, total);
+        //LOGGER.info("[{}/{}] Processing finished!", idx, total);
     }
 
     public static void moveWithAssociated(Path from, Path to) throws IOException {
