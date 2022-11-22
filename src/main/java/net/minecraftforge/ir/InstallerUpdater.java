@@ -84,6 +84,7 @@ class InstallerUpdater {
             else if (ver.startsWith("2."))
                 latest[1] = ver;
         }
+        latest[0] = "1.7.4";
 
         for (int x = 0; x < latest.length; x++) {
             LOGGER.info("Latest " + (x + 1) + ".x: " + latest[x]);
@@ -157,15 +158,20 @@ class InstallerUpdater {
         return true;
     }
 
-    InstallerFormat pre(MavenNotation installer, JarContents jar, InstallerFormat format) {
+    private void add(Set<String> whitelist, JsonObject json, String key) {
+        String data = Utils.getAsString(json, key, null);
+        if (data != null)
+            whitelist.add(JarContents.sanitize(data));
+    }
+
+    InstallerFormat post(MavenNotation installer, JarContents jar, InstallerFormat format, InstallerFormat originalFormat) throws IOException {
         if (!jar.contains(INSTALL_PROFILE))
             return format;
 
+        JarContents newJar = this.latestJars[format == InstallerFormat.V1 ? 0 : 1];
         Set<String> whitelist = new HashSet<>();
         whitelist.add(INSTALL_PROFILE);
         whitelist.add(MANIFEST);
-
-        Set<String> blacklist = this.blacklist[format == InstallerFormat.V1 ? 0 : 1];
 
         JsonObject json = null;
         try (InputStream is = jar.getInput(INSTALL_PROFILE)) {
@@ -186,25 +192,15 @@ class InstallerUpdater {
                 break;
         }
 
-        for (String file : jar.getFiles()) {
-            if (blacklist.contains(file) && !whitelist.contains(file) && !JarContents.isSignature(file))
-                jar.delete(file);
+        if (originalFormat != format || !newJar.sameData(jar, whitelist)) {
+            Set<String> blacklist = this.blacklist[originalFormat == InstallerFormat.V1 ? 0 : 1];
+            for (String file : jar.getFiles()) {
+                if (blacklist.contains(file) && !whitelist.contains(file) && !JarContents.isSignature(file))
+                    jar.delete(file);
+            }
+
+            jar.merge(newJar, false);
         }
-        return format;
-    }
-
-    private void add(Set<String> whitelist, JsonObject json, String key) {
-        String data = Utils.getAsString(json, key, null);
-        if (data != null)
-            whitelist.add(JarContents.sanitize(data));
-    }
-
-    InstallerFormat post(MavenNotation installer, JarContents jar, InstallerFormat format) {
-        if (!jar.contains(INSTALL_PROFILE))
-            return format;
-
-        JarContents newJar = this.latestJars[format == InstallerFormat.V1 ? 0 : 1];
-        jar.merge(newJar, false);
 
         if (jar.contains(MANIFEST) && newJar.contains(MANIFEST)) { // Should always be true, but if not, then the above merge would of injected ours.
             boolean changed = false;

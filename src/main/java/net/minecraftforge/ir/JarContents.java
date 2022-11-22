@@ -55,6 +55,7 @@ class JarContents {
     private static final Logger LOGGER = LogManager.getLogger();
     private static final long DEFAULT_TIME = 1337; // Some JREs don't support time of 0, so use this
     static final String MANIFEST = "META-INF/MANIFEST.MF";
+    private static final HashFunction SHA256 = Hashing.sha256();
 
     static JarContents loadJar(File path) throws IOException {
         Map<String, byte[]> data = new HashMap<>();
@@ -203,6 +204,23 @@ class JarContents {
             if (overwrite || !this.timestamps.containsKey(file))
                 this.setTime(file, other.timestamps.get(file));
         }
+    }
+
+    boolean sameData(JarContents other, Set<String> whitelist) throws IOException {
+        for (String file : getFiles()) {
+            if (whitelist.contains(file))
+                continue;
+
+            if (!other.contains(file))
+                return false;
+
+            HashCode me = HashUtils.hash(SHA256, this.getInput(file));
+            HashCode them = HashUtils.hash(SHA256, other.getInput(file));
+
+            if (!me.equals(them))
+                return false;
+        }
+        return true;
     }
 
     @SuppressWarnings("deprecation")

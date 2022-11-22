@@ -338,14 +338,15 @@ public class InstallerRewriter {
 
         //LOGGER.info("[{}/{}] Processing {}..", idx, total, notation);
 
-        if (instUpdater != null)
-            format = instUpdater.pre(installer, contents, format);
+        InstallerFormat originalFormat = format;
+        //if (instUpdater != null)
+        //    format = instUpdater.pre(installer, contents, format);
         if (mavenUrlFix)
             format = new MavenUrlProcessor().process(installer, contents, format);
         if (convert1To2)
             format = PROCESSORS.get(format).process(installer, contents, format);
         if (instUpdater != null)
-            format = instUpdater.post(installer, contents, format);
+            format = instUpdater.post(installer, contents, format, originalFormat);
         if (deps != null)
             new DependencyLister(deps).process(installer, contents, format);
 
