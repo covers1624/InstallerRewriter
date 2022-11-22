@@ -34,6 +34,7 @@ import java.util.Set;
 import java.util.TreeSet;
 import java.util.jar.Attributes;
 import java.util.jar.Attributes.Name;
+import java.util.stream.Collectors;
 import java.util.jar.Manifest;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -224,6 +225,11 @@ class InstallerUpdater {
                     e.printStackTrace();
                 }
                 jar.write(MANIFEST, os.toByteArray());
+
+                List<String> files = jar.getFiles().stream()
+                .filter(JarContents::isSignature)
+                .collect(Collectors.toList());
+                files.forEach(jar::delete);
             }
         }
         return format;
