@@ -34,7 +34,6 @@ import java.util.Set;
 import java.util.TreeSet;
 import java.util.jar.Attributes;
 import java.util.jar.Attributes.Name;
-import java.util.jar.JarOutputStream;
 import java.util.jar.Manifest;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -84,7 +83,6 @@ class InstallerUpdater {
             else if (ver.startsWith("2."))
                 latest[1] = ver;
         }
-        latest[0] = "1.7.4";
 
         for (int x = 0; x < latest.length; x++) {
             LOGGER.info("Latest " + (x + 1) + ".x: " + latest[x]);
